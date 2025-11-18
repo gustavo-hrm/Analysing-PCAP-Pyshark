@@ -1590,27 +1590,27 @@ function renderC2Graph(containerId, data){
         animationEasing: 'ease-out',
         
         // ✅ CRITICAL: Better spacing parameters
-        nodeRepulsion: 20000,  // Increased from 12000
-        idealEdgeLength: 150,  // Increased from 100
+        nodeRepulsion: 25000,  // Increased from 20000
+        idealEdgeLength: 180,  // Increased from 150
         edgeElasticity: 100,
         
         // ✅ Prevent top-clustering
-        componentSpacing: 100,
+        componentSpacing: 120,  // Increased
         nestingFactor: 1.2,
-        gravity: 1,  // Reduced from 80 to spread nodes out
+        gravity: 0.5,  // REDUCED from 1 to spread vertically
         
         // ✅ Better convergence
-        numIter: 2500,  // Increased iterations
+        numIter: 3000,  // Increased
         initialTemp: 1000,
         coolingFactor: 0.99,
         minTemp: 1.0,
         
         // ✅ Use available space
         fit: true,  // Auto-fit to container
-        padding: 50,  // Padding from edges
+        padding: 60,  // Increased from 50
         randomize: false,
         avoidOverlap: true,  // Prevent node overlap
-        avoidOverlapPadding: 20
+        avoidOverlapPadding: 25  // Increased from 20
       },
       minZoom: 0.2,
       maxZoom: 4,
@@ -1618,7 +1618,7 @@ function renderC2Graph(containerId, data){
       
       // ✅ Auto-fit after layout completes
       ready: function(){
-        this.fit(50);
+        this.fit(60);  // Increased padding from 50
         this.center();
       }
     });
@@ -1632,7 +1632,7 @@ function renderC2Graph(containerId, data){
     
     // ✅ Re-fit after layout animation completes
     setTimeout(() => {
-      cy.fit(50);
+      cy.fit(60);  // Increased padding from 50
     }, 600);
     
   }catch(e){
