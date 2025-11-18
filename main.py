@@ -1515,6 +1515,13 @@ function renderC2Graph(containerId, data){
   };
 
   el.innerHTML = '';
+  
+  // ✅ CRITICAL: Force explicit height on container before Cytoscape initializes
+  // Cytoscape reads container dimensions at initialization time
+  // Setting inline style ensures the height is available immediately
+  el.style.height = '400px';  // ✅ Changed to 400px for side-by-side layout
+  el.style.minHeight = '400px';
+  console.log(`Container ${containerId} forced to 400px height (was ${el.offsetHeight}px)`);
 
   try{
     const cy = cytoscape({
@@ -1590,27 +1597,27 @@ function renderC2Graph(containerId, data){
         animationEasing: 'ease-out',
         
         // ✅ CRITICAL: Better spacing parameters
-        nodeRepulsion: 20000,  // Increased from 12000
-        idealEdgeLength: 150,  // Increased from 100
+        nodeRepulsion: 30000,  // Increased from 25000
+        idealEdgeLength: 200,  // Increased from 180
         edgeElasticity: 100,
         
         // ✅ Prevent top-clustering
-        componentSpacing: 100,
+        componentSpacing: 150,  // Increased from 120
         nestingFactor: 1.2,
-        gravity: 1,  // Reduced from 80 to spread nodes out
+        gravity: 0.1,  // REDUCED from 0.5 to spread vertically even more
         
         // ✅ Better convergence
-        numIter: 2500,  // Increased iterations
+        numIter: 4000,  // Increased from 3000
         initialTemp: 1000,
         coolingFactor: 0.99,
         minTemp: 1.0,
         
         // ✅ Use available space
         fit: true,  // Auto-fit to container
-        padding: 50,  // Padding from edges
+        padding: 80,  // Increased from 60 for more edge spacing
         randomize: false,
         avoidOverlap: true,  // Prevent node overlap
-        avoidOverlapPadding: 20
+        avoidOverlapPadding: 30  // Increased from 25
       },
       minZoom: 0.2,
       maxZoom: 4,
@@ -1618,7 +1625,7 @@ function renderC2Graph(containerId, data){
       
       // ✅ Auto-fit after layout completes
       ready: function(){
-        this.fit(50);
+        this.fit(80);  // Increased padding from 60
         this.center();
       }
     });
@@ -1630,9 +1637,13 @@ function renderC2Graph(containerId, data){
       ddosGraphInstance = cy;
     }
     
+    // ✅ Force resize to ensure Cytoscape uses full container dimensions
+    cy.resize();
+    
     // ✅ Re-fit after layout animation completes
     setTimeout(() => {
-      cy.fit(50);
+      cy.resize();  // Ensure Cytoscape has correct dimensions
+      cy.fit(80);  // Increased padding from 60
     }, 600);
     
   }catch(e){
@@ -1937,16 +1948,18 @@ canvas{
   white-space:nowrap;
 }
 
-/* Graph containers - INCREASED SIZE */
+/* Graph containers - REDUCED SIZE for side-by-side layout */
 #c2graph, #ddosgraph {
   width: 100%;
-  height: 500px;  /* ✅ Increased from 380px to 500px */
+  height: 400px;  /* ✅ Reduced to 400px for side-by-side layout */
   border: 1px solid #e5e7eb;
   background: #fafbfc;
   border-radius: 8px;
   position: relative;
   margin-top: 8px;
-  min-height: 500px;  /* ✅ Ensure minimum height */
+  min-height: 400px;
+  max-height: 400px;
+  flex: 0 0 400px;
 }
 
 #c2graph::after, #ddosgraph::after {
@@ -1964,44 +1977,25 @@ canvas{
   z-index: 1000;
 }
 
-/* Make graph cards taller */
-.card-full {
-  grid-column: 1 / -1;
-  min-height: 550px;  /* ✅ Card minimum height */
+/* Graph cards for side-by-side layout */
+.card-graph {
+  min-height: 450px;  /* ✅ Accommodate 400px graph + padding + heading */
 }
 
 /* Ensure card content fills available space */
-.card-full .chart-box,
-.card-full > div:not(.table-wrap) {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
+.card-graph > div {
+  flex: 0 0 auto;
 }
 
 /* Special styling for graph cards */
-.card-full h3 {
+.card-graph h3 {
   margin-bottom: 8px;
   padding-bottom: 8px;
   border-bottom: 2px solid #e5e7eb;
 }
 
-body.dark .card-full h3 {
+body.dark .card-graph h3 {
   border-bottom-color: #374151;
-}
-
-/* Remove extra spacing around graphs */
-.card-full {
-  padding: 20px;
-}
-
-@media (min-width: 1400px) {
-  #c2graph, #ddosgraph {
-    height: 550px;  /* Even taller on large screens */
-  }
-  
-  .card-full {
-    min-height: 600px;
-  }
 }
 
 /* Ensure graphs fill their containers */
@@ -2155,16 +2149,14 @@ button:hover {
   </div>
 </div>
 
-<!-- Full-width graphs -->
+<!-- Graphs side by side -->
 <div class='card-grid'>
-  <div class='card card-full'>
+  <div class='card card-graph'>
     <h3>C2 Command & Control Graph</h3>
     <div id='c2graph'></div>
   </div>
-</div>
-
-<div class='card-grid'>
-  <div class='card card-full'>
+  
+  <div class='card card-graph'>
     <h3>DDoS Attack Graph</h3>
     <div id='ddosgraph'></div>
   </div>
