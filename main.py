@@ -1516,12 +1516,13 @@ function renderC2Graph(containerId, data){
 
   el.innerHTML = '';
   
-  // ✅ Ensure container has explicit dimensions before Cytoscape initializes
-  // This is critical - Cytoscape needs the container to have a height when it initializes
-  if(el.offsetHeight < 700) {
-    console.warn(`Container ${containerId} height is ${el.offsetHeight}px, forcing to 750px`);
-    el.style.height = '750px';
-  }
+  // ✅ CRITICAL: Force explicit height on container before Cytoscape initializes
+  // Cytoscape reads container dimensions at initialization time
+  // If CSS hasn't been applied yet, it defaults to a tiny height (200px)
+  // Setting inline style ensures the height is available immediately
+  el.style.height = '750px';
+  el.style.minHeight = '750px';
+  console.log(`Container ${containerId} forced to 750px height (was ${el.offsetHeight}px)`);
 
   try{
     const cy = cytoscape({
