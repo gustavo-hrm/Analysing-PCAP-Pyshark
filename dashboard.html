@@ -1,0 +1,98 @@
+<!doctype html>
+<html>
+<head>
+<meta charset='utf-8'/>
+<title>PCAP Dashboard (Stability v20.3 - DDoS Detection)</title>
+<link rel='stylesheet' href='https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css'>
+<link rel='stylesheet' href='https://cdn.datatables.net/buttons/2.4.1/css/buttons.dataTables.min.css'>
+<script src='https://code.jquery.com/jquery-3.7.1.min.js'></script>
+<script src='https://cdn.jsdelivr.net/npm/chart.js@2.9.4/dist/Chart.min.js'></script>
+<script src='https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js'></script>
+<script src='https://cdn.datatables.net/buttons/2.4.1/js/dataTables.buttons.min.js'></script>
+<script src='https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'></script>
+<script src='https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/pdfmake.min.js'></script>
+<script src='https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/vfs_fonts.js'></script>
+<script src='https://cdn.datatables.net/buttons/2.4.1/js/buttons.html5.min.js'></script>
+<script src='https://unpkg.com/cytoscape@3.24.0/dist/cytoscape.min.js'></script>
+<style>
+:root{--card-h:220px}*{box-sizing:border-box}
+body{margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:#f5f7fa;color:#111;font-size:11px}
+.app{display:flex;min-height:100vh}.sidebar{width:260px;background:#0f1724;color:#fff;padding:18px;font-size:11px}.content{flex:1;padding:18px}.card-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;align-items:start}.card{background:#fff;padding:14px;border-radius:10px;box-shadow:0 6px 18px rgba(13,26,40,0.06);display:flex;flex-direction:column}.chart-box{width:100%;height:220px;min-height:220px;max-height:220px;flex:0 0 auto;position:relative;overflow:hidden}.chart-box canvas{width:100% !important;height:100% !important;display:block}.table-wrap{overflow:auto;max-height:220px;margin-top:8px}.display{width:100%;table-layout:fixed !important;white-space:nowrap}.display th,.display td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px 8px;font-size:11px}
+.display td{max-width:200px;word-wrap:break-word;overflow-wrap:break-word;white-space:normal !important}
+.display td.nowrap{white-space:nowrap}
+#heatmap_canvas{width:100%;height:360px;border:1px solid #e6e9ef;background:#fff;display:block}#c2graph,#ddosgraph{width:100%;height:320px;border:1px solid #e6e9ef;background:#fff}
+body.dark { background: #0b1116 !important; color: #e6eef6 !important; }
+body.dark .sidebar { background:#071018 !important; color:#e6eef6 !important; }
+body.dark .card { background:#0e1620 !important; color:#e6eef6 !important; box-shadow: 0 6px 18px rgba(0,0,0,0.6); }
+body.dark .display th, body.dark .display td { color:#d6e6f6 !important; background: transparent !important; }
+body.dark #c2graph, body.dark #ddosgraph, body.dark #heatmap_canvas { background:#071018 !important; border-color:#21313d !important; }
+</style>
+</head>
+<body>
+<div class='app'>
+  <aside class='sidebar'>
+    <h2 style='margin:0 0 8px 0'>PCAP Dashboard</h2>
+    <div style='font-size:12px;opacity:0.9'>File: ataques_out_novembro_2025.pcapng</div>
+    <div style='margin-top:12px'><button id='clear_filters' style='padding:8px;border-radius:6px;background:#10b981;color:#fff;border:none;cursor:pointer'>Clear Filters</button></div>
+  </aside>
+  <main class='content'>
+    <h1 style='margin:0 0 12px 0'>PCAP Analysis Dashboard (Stability v20.3 - DDoS Detection)</h1>
+
+    <div style='margin-bottom:12px'>
+      <label>Source IP: <input id='filter_src' type='text'></label>
+      <label style='margin-left:12px'>Dest IP: <input id='filter_dst' type='text'></label>
+      <label style='margin-left:12px'>Domain/SNI: <input id='filter_dom' type='text'></label>
+      <label style='margin-left:12px'>Show Top: <select id='topN'><option value='15'>15</option><option value='25'>25</option><option value='50'>50</option><option value='99999'>All</option></select></label>
+      <button id='darkToggle' style='margin-left:12px'>Dark</button>
+    </div>
+
+    <div class='card-grid'>
+      <div class='card'><h3>Timeline</h3><div class='chart-box'><canvas id='chart_timeline'></canvas></div></div>
+      <div class='card'><h3>C2 Graph</h3><div id='c2graph'></div></div>
+      <div class='card'><h3>DDoS Attack Graph</h3><div id='ddosgraph'></div></div>
+      <div class='card'><h3>DNS Top</h3><div class='chart-box'><canvas id='chart_dns'></canvas></div><div class='table-wrap'><table id='tbl_dns' class='display'><thead><tr><th>DOMAIN</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
+      <div class='card'><h3>HTTP Top</h3><div class='chart-box'><canvas id='chart_http'></canvas></div><div class='table-wrap'><table id='tbl_http' class='display'><thead><tr><th>DOMAIN</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
+      <div class='card'><h3>TLS SNI / JA3</h3><div class='chart-box'><canvas id='chart_tls'></canvas></div><div class='table-wrap'><table id='tbl_tls' class='display'><thead><tr><th>SNI</th><th>JA3</th><th>SRC_IP</th><th>DST_IP</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
+      <div class='card'><h3>TCP Flags</h3><div class='chart-box'><canvas id='chart_tcp'></canvas></div><div class='table-wrap'><table id='tbl_tcp' class='display'><thead><tr><th>SRC_IP</th><th>DST_IP</th><th>FLAGS</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
+    </div>
+
+    <div style='margin-top:18px' class='card'>
+      <h3>DDoS Attack Detection</h3>
+      <div class='table-wrap'><table id='tbl_ddos' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <div style='margin-top:18px' class='card'>
+      <h3>HTTP C2 Target Distribution</h3>
+      <div class='table-wrap'><table id='tbl_http_c2' class='display'><thead><tr><th>C2 Server</th><th>Bots</th><th>IPs Extracted</th><th>Targets Distributed</th><th>Payload Sample</th><th>Attacked</th><th>Correlation</th><th>Time</th><th>Score</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <div style='margin-top:18px' class='card'>
+      <h3>Advanced Heuristics</h3>
+      <div class='table-wrap'><table id='tbl_adv' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
+
+    <div style='margin-top:18px' class='card'>
+      <h3>Beaconing Detection</h3>
+      <div class='table-wrap'><table id='tbl_beacon' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <div style='margin-top:18px' class='card'>
+      <h3>DNS Tunneling</h3>
+      <div class='table-wrap'><table id='tbl_dnstunnel' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th><th>NOTES</th></tr></thead><tbody></tbody></table></div>
+    </div>
+    </div>
+
+    <div style='margin-top:18px' class='card'>
+      <h3>C2 / Botnet Heuristics (Full)</h3>
+      <div class='table-wrap'><table id='tbl_c2' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <div style='margin-top:18px' class='card'>
+      <h3>Pivot (Source → Destination)</h3>
+      <div class='table-wrap'><table id='pivot' class='display'><thead><tr><th>SRC</th><th>DST</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+  </main>
+</div>
+<script src='dashboard.js'></script>
+</body>
+</html>

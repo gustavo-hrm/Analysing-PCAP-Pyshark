@@ -29,9 +29,61 @@ except Exception:
 FILE_PCAP = "ataques_out_novembro_2025.pcapng"
 
 TRUSTED_DOMAINS = {
-    "google.com","facebook.com","oracle.com","microsoft.com","apple.com",
-    "amazon.com","linkedin.com","cloudflare.com","youtube.com","whatsapp.net",
-    "googleapis.com","twitter.com","ytimg.com","fbcdn.net","tiktokv.com","instagram.com","gstatic.com"
+    # Major Tech Companies
+    "google.com", "googleapis.com", "gstatic.com", "googleusercontent.com", "googlevideo.com", "ggpht.com",
+    "facebook.com", "fbcdn.net", "fbsbx.com", "facebook.net",
+    "microsoft.com", "windows.com", "live.com", "msn.com", "office.com", "office365.com", "microsoftonline.com",
+    "apple.com", "icloud.com", "apple-cloudkit.com", "cdn-apple.com", "mzstatic.com",
+    "amazon.com", "amazonaws.com", "cloudfront.net", "aws.amazon.com", "awsstatic.com",
+    "twitter.com", "twimg.com", "t.co",
+    "linkedin.com", "licdn.com",
+    "instagram.com", "cdninstagram.com",
+    "youtube.com", "ytimg.com", "youtu.be",
+    "whatsapp.net", "whatsapp.com",
+    "tiktok.com", "tiktokv.com", "tiktokcdn.com", "byteoversea.com", "musical.ly",
+    
+    # CDN & Cloud Infrastructure
+    "cloudflare.com", "cloudflare.net", "cf-ns.com", "cloudflareinsights.com",
+    "akamai.com", "akamai.net", "akamaiedge.net", "akamaitechnologies.com", "akamaitech.net",
+    "fastly.com", "fastly.net", "fastlylb.net",
+    "edgecast.com", "edgecastcdn.net",
+    "azureedge.net", "azure.com", "windowsazure.com",
+    "incapsula.com", "imperva.com",
+    "maxcdn.com", "bootstrapcdn.com", "stackpathcdn.com",
+    
+    # Content & Media
+    "netflix.com", "nflxvideo.net", "nflxext.com", "nflximg.net", "nflxso.net",
+    "spotify.com", "scdn.co", "spotifycdn.com",
+    "twitch.tv", "ttvnw.net", "jtvnw.net",
+    "vimeo.com", "vimeocdn.com",
+    "reddit.com", "redd.it", "redditstatic.com", "redditmedia.com",
+    "imgur.com", "imgur.io",
+    "soundcloud.com", "sndcdn.com",
+    
+    # Security & Infrastructure  
+    "mozilla.org", "mozilla.com", "mozilla.net", "firefox.com",
+    "adobe.com", "adobecc.com", "typekit.net", "adobedtm.com",
+    "symantec.com", "verisign.com", "digicert.com", "sectigo.com",
+    "letsencrypt.org", "acme.org",
+    "oracle.com", "oraclecloud.com",
+    
+    # Common Services & Collaboration
+    "dropbox.com", "dropboxusercontent.com", "dropboxstatic.com",
+    "zoom.us", "zoom.com", "zoomgov.com",
+    "slack.com", "slack-edge.com", "slack-imgs.com",
+    "github.com", "githubusercontent.com", "github.io", "githubassets.com", "githubapp.com",
+    "stackoverflow.com", "stackexchange.com", "sstatic.net",
+    "wordpress.com", "wp.com", "wordpress.org",
+    "shopify.com", "shopifycdn.com",
+    "salesforce.com", "force.com", "salesforceliveagent.com",
+    
+    # Analytics & Ads (legitimate)
+    "doubleclick.net", "googlesyndication.com", "googleadservices.com", "googletagmanager.com",
+    "analytics.google.com", "google-analytics.com",
+    
+    # CDN Libraries & Resources
+    "jquery.com", "jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com", "cdnjs.com",
+    "fontawesome.com", "fonts.googleapis.com", "fonts.gstatic.com"
 }
 MAX_GRAPH_EDGES = 50   # cap to avoid hairballs
 GRAPH_MIN_SCORE = 25    # minimal SCORE for graph-worthy indicators
@@ -64,6 +116,37 @@ def is_trusted_domain(domain):
     if not domain: return False
     d = domain.lower().strip().rstrip('.')
     return any(d == t or d.endswith('.' + t) for t in TRUSTED_DOMAINS)
+
+def is_private_ip(ip):
+    """Check if IP is private (RFC1918) or invalid"""
+    if not ip or ':' in ip:  # Skip IPv6 and empty
+        return True
+    parts = ip.split('.')
+    if len(parts) != 4:
+        return True
+    try:
+        octets = [int(p) for p in parts]
+        # Validate range
+        if any(o < 0 or o > 255 for o in octets):
+            return True
+        # 10.0.0.0/8
+        if octets[0] == 10:
+            return True
+        # 172.16.0.0/12
+        if octets[0] == 172 and 16 <= octets[1] <= 31:
+            return True
+        # 192.168.0.0/16
+        if octets[0] == 192 and octets[1] == 168:
+            return True
+        # 127.0.0.0/8 (localhost)
+        if octets[0] == 127:
+            return True
+        # 0.0.0.0/8 and 255.0.0.0/8
+        if octets[0] == 0 or octets[0] == 255:
+            return True
+        return False
+    except:
+        return True
 
 def safe_js_json(obj):
     # ensure JSON is safe to embed in <script>
@@ -682,6 +765,112 @@ def detect_dnstunneling(dns_df):
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','NOTES'])
 
 # -----------------------
+# HTTP C2 Target Distribution Detection
+# -----------------------
+def detect_http_target_distribution(http_df, tcp_df):
+    """Detect HTTP C2 servers distributing target IP lists to bots"""
+    rows = []
+    if http_df.empty:
+        return pd.DataFrame(columns=['C2_SERVER','BOT_COUNT','EXTRACTED_IPS','TARGETS_DISTRIBUTED','PAYLOAD_SAMPLE','TARGETS_ATTACKED','CORRELATION_SCORE','TIME_TO_ATTACK','SCORE'])
+    
+    try:
+        # Group HTTP traffic by domain (potential C2 servers)
+        c2_commands = {}
+        
+        # IP extraction regex pattern - matches IPv4 addresses
+        ip_pattern = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
+        
+        # Analyze HTTP responses for IP lists
+        for _, row in http_df.iterrows():
+            domain = row.get('DOMAIN', '') or ''
+            if not domain or is_trusted_domain(domain):
+                continue
+            
+            request = row.get('REQUEST', '') or ''
+            src_ip = row.get('SRC_IP', '') or ''
+            
+            # Extract payload/request content
+            payload = request
+            
+            # Extract all IPs from payload
+            all_ips = ip_pattern.findall(payload)
+            
+            # Filter to keep only public IPs
+            public_ips = [ip for ip in all_ips if not is_private_ip(ip)]
+            
+            # Only consider if we found at least 1 public IP
+            if len(public_ips) >= 1:
+                if domain not in c2_commands:
+                    c2_commands[domain] = {
+                        'bots': set(),
+                        'targets': set(),
+                        'payload_sample': payload[:500],  # Keep first 500 chars
+                        'timestamps': []
+                    }
+                
+                c2_commands[domain]['bots'].add(src_ip)
+                c2_commands[domain]['targets'].update(public_ips)
+                if 'TS' in row:
+                    c2_commands[domain]['timestamps'].append(row['TS'])
+        
+        # Correlate with actual attacks in TCP traffic
+        for c2_server, data in c2_commands.items():
+            bot_count = len(data['bots'])
+            all_distributed_targets = data['targets']
+            payload_sample = data['payload_sample']
+            
+            # Check if distributed IPs were actually attacked
+            targets_attacked = set()
+            correlation_score = 0
+            time_to_attack = 0
+            
+            if not tcp_df.empty and 'DST_IP' in tcp_df.columns:
+                # Find which distributed targets were attacked
+                tcp_dsts = set(tcp_df['DST_IP'].dropna().unique())
+                targets_attacked = all_distributed_targets.intersection(tcp_dsts)
+                
+                # Calculate correlation score
+                if len(all_distributed_targets) > 0:
+                    correlation_score = int((len(targets_attacked) / len(all_distributed_targets)) * 100)
+                
+                # Calculate time to attack (if timestamps available)
+                if data['timestamps'] and 'TS' in tcp_df.columns:
+                    c2_time = min(data['timestamps'])
+                    # Find earliest attack on distributed targets
+                    attack_times = []
+                    for target in targets_attacked:
+                        target_attacks = tcp_df[tcp_df['DST_IP'] == target]
+                        if not target_attacks.empty and 'TS' in target_attacks.columns:
+                            attack_times.extend(target_attacks['TS'].dropna().tolist())
+                    
+                    if attack_times:
+                        first_attack = min(attack_times)
+                        time_to_attack = int(first_attack - c2_time) if first_attack > c2_time else 0
+            
+            # Calculate threat score
+            score = 50  # Base score
+            score += min(30, bot_count * 5)  # More bots = higher score
+            score += min(20, correlation_score // 5)  # High correlation = higher score
+            score = min(100, score)
+            
+            rows.append({
+                'C2_SERVER': c2_server,
+                'BOT_COUNT': bot_count,
+                'EXTRACTED_IPS': len(all_distributed_targets),
+                'TARGETS_DISTRIBUTED': ", ".join(sorted(list(all_distributed_targets))[:10]),  # Show up to 10 IPs
+                'PAYLOAD_SAMPLE': payload_sample[:300],  # First 300 chars of payload
+                'TARGETS_ATTACKED': len(targets_attacked),
+                'CORRELATION_SCORE': correlation_score,
+                'TIME_TO_ATTACK': f"{time_to_attack}s" if time_to_attack > 0 else "N/A",
+                'SCORE': score
+            })
+        
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['C2_SERVER','BOT_COUNT','EXTRACTED_IPS','TARGETS_DISTRIBUTED','PAYLOAD_SAMPLE','TARGETS_ATTACKED','CORRELATION_SCORE','TIME_TO_ATTACK','SCORE'])
+
+# -----------------------
 # DDoS Detection Functions
 # -----------------------
 
@@ -1147,6 +1336,9 @@ const dnstunnelData = %%DNSTUNNEL%%;
 const ddosData      = %%DDOS%%;      // all DDoS detections
 const ddosGraphData = %%DDOSGRAPH%%; // DDoS graph subset
 
+// HTTP C2 Detection Data
+const httpC2Data    = %%HTTPC2%%;    // HTTP C2 target distribution
+
 
 // ------------------------------------------------------------
 // Table rendering helper
@@ -1159,6 +1351,7 @@ function renderTableRows(tbody, rows, cols){
     cols.forEach(c=>{
       const td = document.createElement('td');
       td.textContent = r[c] !== undefined ? r[c] : '';
+      td.title = td.textContent;  // Show full text on hover
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
@@ -1251,24 +1444,43 @@ function renderC2Graph(containerId, data){
 
   const nodes = {};
   const edges = [];
+  const nodeScores = {};  // NEW: Track max score per node
 
   data.slice(0,500).forEach((r,i)=>{
 
     // Graph expects SRC_IP and DST_IP
     const s = r.SRC_IP || ('src'+i);
     const d = r.DST_IP || ('dst'+i);
+    const score = r.SCORE || 0;
 
     nodes[s] = (nodes[s]||0) + (r.COUNT||1);
     nodes[d] = (nodes[d]||0) + (r.COUNT||1);
 
+    // Track highest score for each node
+    nodeScores[s] = Math.max(nodeScores[s] || 0, score);
+    nodeScores[d] = Math.max(nodeScores[d] || 0, score);
+
     edges.push({
-      data:{ id:'e'+i, source:s, target:d, weight:r.COUNT||1 }
+      data:{ id:'e'+i, source:s, target:d, weight:r.COUNT||1, score: score }
     });
   });
 
   const cy_nodes = Object.keys(nodes).map(n=>({
-    data:{ id:n, label:n, weight:nodes[n] }
+    data:{ 
+      id:n, 
+      label: n + '\n[' + (nodeScores[n] || 0) + ']',  // Show IP + score
+      weight:nodes[n],
+      score: nodeScores[n] || 0
+    }
   }));
+
+  // Color nodes by score (red = high threat)
+  const getNodeColor = (score) => {
+    if (score >= 90) return '#dc2626';  // Red - critical
+    if (score >= 75) return '#ea580c';  // Orange - high
+    if (score >= 60) return '#f59e0b';  // Yellow - medium
+    return '#1976d2';  // Blue - low/info
+  };
 
   el.innerHTML = '';
 
@@ -1284,25 +1496,32 @@ function renderC2Graph(containerId, data){
           selector:'node',
           style:{
             'label': 'data(label)',
-            'width':'mapData(weight,0,100,8,36)',
-            'height':'mapData(weight,0,100,8,36)',
-            'background-color':'#1976d2',
+            'width':'mapData(weight,0,100,12,42)',
+            'height':'mapData(weight,0,100,12,42)',
+            'background-color': function(ele){ return getNodeColor(ele.data('score')); },
             'color':'#fff',
             'text-valign':'center',
             'text-halign':'center',
-            'font-size':11
+            'font-size': 9,
+            'text-wrap': 'wrap',
+            'text-max-width': 80
           }
         },
         {
           selector:'edge',
           style:{
             'width':'mapData(weight,0,100,1,6)',
-            'line-color':'#999',
+            'line-color': function(ele){ 
+              const score = ele.data('score');
+              if (score >= 90) return '#dc2626';
+              if (score >= 75) return '#ea580c';
+              return '#999';
+            },
             'opacity':0.85
           }
         }
       ],
-      layout:{ name:'cose', animate:false }
+      layout:{ name:'cose', animate:false, nodeRepulsion: 8000 }
     });
   }catch(e){
     console.log('cytoscape err', e);
@@ -1361,6 +1580,12 @@ function updateDashboard(){
   // DDoS Detection table
   const ddosSlice = (ddosData||[]).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
   renderTableRows(document.querySelector('#tbl_ddos tbody'), ddosSlice, ['INDICATOR','TYPE','SCORE','COUNT']);
+
+  // HTTP C2 Detection table
+  const httpC2Slice = (httpC2Data||[]).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  renderTableRows(document.querySelector('#tbl_http_c2 tbody'), httpC2Slice, 
+    ['C2_SERVER','BOT_COUNT','EXTRACTED_IPS','TARGETS_DISTRIBUTED','PAYLOAD_SAMPLE',
+     'TARGETS_ATTACKED','CORRELATION_SCORE','TIME_TO_ATTACK','SCORE']);
 
   // ------------------------
   // PIVOT
@@ -1477,7 +1702,10 @@ HTML_TEMPLATE = r"""<!doctype html>
 <style>
 :root{--card-h:220px}*{box-sizing:border-box}
 body{margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:#f5f7fa;color:#111;font-size:11px}
-.app{display:flex;min-height:100vh}.sidebar{width:260px;background:#0f1724;color:#fff;padding:18px;font-size:11px}.content{flex:1;padding:18px}.card-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;align-items:start}.card{background:#fff;padding:14px;border-radius:10px;box-shadow:0 6px 18px rgba(13,26,40,0.06);display:flex;flex-direction:column}.chart-box{width:100%;height:220px;min-height:220px;max-height:220px;flex:0 0 auto;position:relative;overflow:hidden}.chart-box canvas{width:100% !important;height:100% !important;display:block}.table-wrap{overflow:auto;max-height:220px;margin-top:8px}.display{width:100%;table-layout:fixed !important;white-space:nowrap}.display th,.display td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px 8px;font-size:11px}#heatmap_canvas{width:100%;height:360px;border:1px solid #e6e9ef;background:#fff;display:block}#c2graph,#ddosgraph{width:100%;height:320px;border:1px solid #e6e9ef;background:#fff}
+.app{display:flex;min-height:100vh}.sidebar{width:260px;background:#0f1724;color:#fff;padding:18px;font-size:11px}.content{flex:1;padding:18px}.card-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;align-items:start}.card{background:#fff;padding:14px;border-radius:10px;box-shadow:0 6px 18px rgba(13,26,40,0.06);display:flex;flex-direction:column}.chart-box{width:100%;height:220px;min-height:220px;max-height:220px;flex:0 0 auto;position:relative;overflow:hidden}.chart-box canvas{width:100% !important;height:100% !important;display:block}.table-wrap{overflow:auto;max-height:220px;margin-top:8px}.display{width:100%;table-layout:fixed !important;white-space:nowrap}.display th,.display td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px 8px;font-size:11px}
+.display td{max-width:200px;word-wrap:break-word;overflow-wrap:break-word;white-space:normal !important}
+.display td.nowrap{white-space:nowrap}
+#heatmap_canvas{width:100%;height:360px;border:1px solid #e6e9ef;background:#fff;display:block}#c2graph,#ddosgraph{width:100%;height:320px;border:1px solid #e6e9ef;background:#fff}
 body.dark { background: #0b1116 !important; color: #e6eef6 !important; }
 body.dark .sidebar { background:#071018 !important; color:#e6eef6 !important; }
 body.dark .card { background:#0e1620 !important; color:#e6eef6 !important; box-shadow: 0 6px 18px rgba(0,0,0,0.6); }
@@ -1519,6 +1747,11 @@ body.dark #c2graph, body.dark #ddosgraph, body.dark #heatmap_canvas { background
     </div>
 
     <div style='margin-top:18px' class='card'>
+      <h3>HTTP C2 Target Distribution</h3>
+      <div class='table-wrap'><table id='tbl_http_c2' class='display'><thead><tr><th>C2 Server</th><th>Bots</th><th>IPs Extracted</th><th>Targets Distributed</th><th>Payload Sample</th><th>Attacked</th><th>Correlation</th><th>Time</th><th>Score</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <div style='margin-top:18px' class='card'>
       <h3>Advanced Heuristics</h3>
       <div class='table-wrap'><table id='tbl_adv' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
 
@@ -1557,26 +1790,26 @@ def pipeline(pcap=FILE_PCAP):
     try:
         print("\n=== Stability v20.3: Starting pipeline with DDoS Detection ===\n")
 
-        print("[1/14] Parsing PCAP (enhanced for DDoS detection)...")
+        print("[1/15] Parsing PCAP (enhanced for DDoS detection)...")
         dns, tcp, http, tls, udp, icmp, dns_detail = parse_streams(pcap)
 
-        print("[2/14] Aggregating DNS...")
+        print("[2/15] Aggregating DNS...")
         dnsA = agg(dns, ['DOMAIN'])
 
-        print("[3/14] Aggregating HTTP...")
+        print("[3/15] Aggregating HTTP...")
         httpA = agg(http, ['DOMAIN'])
 
-        print("[4/14] Aggregating TLS (ensure columns exist)...")
+        print("[4/15] Aggregating TLS (ensure columns exist)...")
         tls_cols = ['SNI', 'JA3', 'SRC_IP', 'DST_IP']
         for col in tls_cols:
             if col not in tls.columns:
                 tls[col] = None
         tlsA = agg(tls, tls_cols)
 
-        print("[5/14] Aggregating TCP...")
+        print("[5/15] Aggregating TCP...")
         tcpA = agg(tcp, ['SRC_IP', 'DST_IP', 'FLAGS'])
 
-        print("[6/14] Building HTTP Timeline...")
+        print("[6/15] Building HTTP Timeline...")
         timeline = {}
         if os.path.exists(pcap) and PcapReader:
             # Use http dataframe if it already has timestamps
@@ -1587,11 +1820,11 @@ def pipeline(pcap=FILE_PCAP):
                     timeline[key] = timeline.get(key, 0) + 1
         timeline_list = [{'label': k, 'count': v} for k, v in sorted(timeline.items())]
 
-        print("[7/14] Computing full C2 heuristic indicators...")
+        print("[7/15] Computing full C2 heuristic indicators...")
         c2_full = compute_c2_heuristics(dnsA, httpA, tlsA, tcpA)
 
         # Build graph subset (filtered) for readable graph
-        print("[8/14] Preparing compact C2 dataset for graph (filter + cap)...")
+        print("[8/15] Preparing compact C2 dataset for graph (filter + cap)...")
 
         # pick only "graph-worthy" types and high scores, but keep fallback to some rows if empty
         important_prefixes = [
@@ -1632,20 +1865,24 @@ def pipeline(pcap=FILE_PCAP):
         print(f"  - c2_full rows: {len(c2_full)}")
         print(f"  - c2_graph rows (graph): {len(c2_graph)}")
 
-        print("[9/14] Computing Advanced Heuristics...")
+        print("[9/15] Computing Advanced Heuristics...")
         adv = compute_advanced_heuristics(dnsA, httpA, tlsA, tcpA, timeline_list)
 
-        print("[10/14] Detecting Beaconing...")
+        print("[10/15] Detecting Beaconing...")
         beacon = detect_beaconing(tcp)
 
-        print("[11/14] Detecting DNS Tunneling...")
+        print("[11/15] Detecting DNS Tunneling...")
         dnstunnel = detect_dnstunneling(dns)
         
-        print("[12/14] Computing DDoS Attack Heuristics...")
+        print("[12/15] Detecting HTTP C2 Target Distribution...")
+        http_c2 = detect_http_target_distribution(http, tcp)
+        print(f"  - HTTP C2 detections: {len(http_c2)}")
+        
+        print("[13/15] Computing DDoS Attack Heuristics...")
         ddos = compute_ddos_heuristics(tcp, udp, icmp, http, dns_detail, c2_full)
         print(f"  - DDoS detections: {len(ddos)}")
         
-        print("[13/14] Preparing DDoS graph subset...")
+        print("[14/14] Preparing DDoS graph subset...")
         # Create graph-worthy DDoS subset (similar to C2 graph logic)
         if not ddos.empty:
             ddos_graph = ddos[ddos['SCORE'] >= GRAPH_MIN_SCORE].copy()
@@ -1656,7 +1893,7 @@ def pipeline(pcap=FILE_PCAP):
         print(f"  - ddos_graph rows: {len(ddos_graph)}")
 
         # Build JS and HTML files
-        print("[14/14] Writing dashboard.js and dashboard.html ...")
+        print("[15/15] Writing dashboard.js and dashboard.html ...")
         js = (
             JS_TEMPLATE
             .replace('%%DNS%%', safe_js_json(dnsA.to_dict(orient='records')))
@@ -1671,6 +1908,7 @@ def pipeline(pcap=FILE_PCAP):
             .replace('%%DNSTUNNEL%%', safe_js_json(dnstunnel.to_dict(orient='records')))
             .replace('%%DDOS%%', safe_js_json(ddos.to_dict(orient='records')))
             .replace('%%DDOSGRAPH%%', safe_js_json(ddos_graph.to_dict(orient='records')))
+            .replace('%%HTTPC2%%', safe_js_json(http_c2.to_dict(orient='records')))
         )
 
         with open('dashboard.js', 'w', encoding='utf-8') as jf:
