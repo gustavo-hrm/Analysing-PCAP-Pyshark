@@ -1882,7 +1882,7 @@ def pipeline(pcap=FILE_PCAP):
         ddos = compute_ddos_heuristics(tcp, udp, icmp, http, dns_detail, c2_full)
         print(f"  - DDoS detections: {len(ddos)}")
         
-        print("[14/14] Preparing DDoS graph subset...")
+        print("[14/15] Preparing DDoS graph subset...")
         # Create graph-worthy DDoS subset (similar to C2 graph logic)
         if not ddos.empty:
             ddos_graph = ddos[ddos['SCORE'] >= GRAPH_MIN_SCORE].copy()
