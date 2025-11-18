@@ -281,7 +281,7 @@ def parse_streams(pcap_path):
         return (
             pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT']),
-            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP']),
+            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','PAYLOAD']),
             pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE']),
@@ -292,7 +292,7 @@ def parse_streams(pcap_path):
         return (
             pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT']),
-            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP']),
+            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','PAYLOAD']),
             pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE']),
@@ -371,6 +371,10 @@ def parse_streams(pcap_path):
                         # Robust HTTP detection with method extraction
                         try:
                             txt = payload.decode(errors='ignore')
+                            # Store payload text (up to 5000 chars)
+                            payload_text = txt[:5000] if txt else ''
+                            
+                            # Detect HTTP requests
                             http_match = re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', txt)
                             if http_match:
                                 method = http_match.group(1)
@@ -393,7 +397,37 @@ def parse_streams(pcap_path):
                                         'COUNT': 1,
                                         'METHOD': method,
                                         'TS': ts,
-                                        'SRC_IP': src
+                                        'SRC_IP': src,
+                                        'PAYLOAD': payload_text
+                                    })
+                            
+                            # Detect HTTP responses
+                            response_match = re.search(r'^HTTP/\d\.\d\s+(\d{3})', txt, re.MULTILINE)
+                            if response_match:
+                                status_code = response_match.group(1)
+                                lines = txt.splitlines()
+                                # Try to extract Host from response or use destination IP
+                                host = None
+                                for ln in lines:
+                                    m = _http_host_re.search(ln)
+                                    if m:
+                                        host = m.group(1).strip(); break
+                                
+                                # If no host found in response, use dst IP as identifier
+                                if not host:
+                                    host = dst
+                                
+                                # Store response with status line as REQUEST
+                                status_line = lines[0] if lines else f'HTTP Response {status_code}'
+                                if not is_trusted_domain(host):
+                                    http_rows.append({
+                                        'DOMAIN': host,
+                                        'REQUEST': status_line,
+                                        'COUNT': 1,
+                                        'METHOD': f'RESPONSE_{status_code}',
+                                        'TS': ts,
+                                        'SRC_IP': src,
+                                        'PAYLOAD': payload_text
                                     })
                         except Exception:
                             pass
@@ -442,7 +476,7 @@ def parse_streams(pcap_path):
 
     dns_df = pd.DataFrame(dns_rows) if dns_rows else pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY'])
     tcp_df = pd.DataFrame(tcp_rows) if tcp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT'])
-    http_df = pd.DataFrame(http_rows) if http_rows else pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP'])
+    http_df = pd.DataFrame(http_rows) if http_rows else pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','PAYLOAD'])
     tls_df = pd.DataFrame(tls_rows) if tls_rows else pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT'])
     udp_df = pd.DataFrame(udp_rows) if udp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE'])
     icmp_df = pd.DataFrame(icmp_rows) if icmp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE'])
@@ -789,14 +823,22 @@ def detect_http_target_distribution(http_df, tcp_df):
             request = row.get('REQUEST', '') or ''
             src_ip = row.get('SRC_IP', '') or ''
             
-            # Extract payload/request content
-            payload = request
+            # Extract payload content (new PAYLOAD column)
+            payload = row.get('PAYLOAD', '') or ''
+            
+            # Search in both request line and full payload
+            search_text = request + '\n' + payload
             
             # Extract all IPs from payload
-            all_ips = ip_pattern.findall(payload)
+            all_ips = ip_pattern.findall(search_text)
             
             # Filter to keep only public IPs
             public_ips = [ip for ip in all_ips if not is_private_ip(ip)]
+            
+            # Debug output when public IPs are found
+            if len(public_ips) >= 1:
+                print(f"[DEBUG] Found {len(public_ips)} public IPs in payload from {domain}")
+                print(f"[DEBUG] Sample IPs: {public_ips[:10]}")
             
             # Only consider if we found at least 1 public IP
             if len(public_ips) >= 1:
