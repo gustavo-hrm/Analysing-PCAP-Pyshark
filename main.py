@@ -198,7 +198,7 @@ def parse_streams(pcap_path):
         return (
             pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT']),
-            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP']),
+            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','PAYLOAD']),
             pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE']),
@@ -209,7 +209,7 @@ def parse_streams(pcap_path):
         return (
             pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT']),
-            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP']),
+            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','PAYLOAD']),
             pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE']),
@@ -303,6 +303,8 @@ def parse_streams(pcap_path):
                                         if m2:
                                             host = m2.group(2).strip(); break
                                 request_line = next((ln for ln in lines if re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', ln)), lines[0] if lines else '')
+                                # Store payload (limit to first 2048 bytes)
+                                payload_text = txt[:2048] if len(txt) > 2048 else txt
                                 if host and not is_trusted_domain(host):
                                     http_rows.append({
                                         'DOMAIN': host,
@@ -310,7 +312,8 @@ def parse_streams(pcap_path):
                                         'COUNT': 1,
                                         'METHOD': method,
                                         'TS': ts,
-                                        'SRC_IP': src
+                                        'SRC_IP': src,
+                                        'PAYLOAD': payload_text
                                     })
                         except Exception:
                             pass
@@ -359,7 +362,7 @@ def parse_streams(pcap_path):
 
     dns_df = pd.DataFrame(dns_rows) if dns_rows else pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY'])
     tcp_df = pd.DataFrame(tcp_rows) if tcp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT'])
-    http_df = pd.DataFrame(http_rows) if http_rows else pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP'])
+    http_df = pd.DataFrame(http_rows) if http_rows else pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','PAYLOAD'])
     tls_df = pd.DataFrame(tls_rows) if tls_rows else pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT'])
     udp_df = pd.DataFrame(udp_rows) if udp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE'])
     icmp_df = pd.DataFrame(icmp_rows) if icmp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE'])
@@ -392,9 +395,26 @@ MALICIOUS_JA3 = {
     "6734f37431670b3ab4292b8f60f29984": "Meterpreter",
 }
 
-def compute_c2_heuristics(dnsA, httpA, tlsA, tcpA):
+def compute_c2_heuristics(dnsA, httpA, tlsA, tcpA, http_full=None):
     rows = []
     def high_entropy(name): return bool(name) and (shannon_entropy(name) >= 3.8 or len(name) >= 45)
+
+    # C2 Payload Pattern Detection (if http_full DataFrame provided with PAYLOAD column)
+    if http_full is not None and not http_full.empty:
+        try:
+            c2_payload_detections = detect_c2_payload_patterns(http_full, tcpA)
+            if not c2_payload_detections.empty:
+                for _, r in c2_payload_detections.iterrows():
+                    rows.append({
+                        'INDICATOR': r.get('INDICATOR', ''),
+                        'TYPE': r.get('TYPE', ''),
+                        'SCORE': int(r.get('SCORE', 0)),
+                        'COUNT': int(r.get('COUNT', 0)),
+                        'SRC_IP': r.get('SRC_IP', ''),
+                        'DST_IP': r.get('DST_IP', ''),
+                    })
+        except Exception:
+            pass
 
     # High-entropy DNS - need to correlate with TCP connections
     if not dnsA.empty:
@@ -680,6 +700,214 @@ def detect_dnstunneling(dns_df):
     except Exception:
         pass
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','NOTES'])
+
+# -----------------------
+# C2 Payload Detection Functions
+# -----------------------
+
+def extract_ip_port_lists_from_payload(payload_text):
+    """Extract IP:port pairs from payload using regex pattern"""
+    if not payload_text:
+        return []
+    try:
+        # Pattern for IP:port (e.g., 207.174.105.76:9998)
+        ip_port_pattern = r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)\b'
+        matches = re.findall(ip_port_pattern, payload_text)
+        # Return list of tuples (ip, port)
+        return [(ip, port) for ip, port in matches if all(int(octet) <= 255 for octet in ip.split('.'))]
+    except Exception:
+        return []
+
+def detect_attack_command_parameters(payload_text):
+    """Detect numeric parameter sequences that indicate attack configuration"""
+    if not payload_text:
+        return {'has_params': False, 'param_count': 0, 'params': []}
+    try:
+        # Look for sequences of numbers separated by semicolons or commas
+        # Pattern: number;number;number or number,number,number
+        param_patterns = [
+            r'\b(\d+)[;,](\d+)[;,](\d+)',  # At least 3 numeric parameters
+            r'^(\d+)[;,]',  # Start with number followed by separator
+        ]
+        
+        params = []
+        for pattern in param_patterns:
+            matches = re.findall(pattern, payload_text)
+            if matches:
+                # Flatten tuples and convert to integers
+                for match in matches:
+                    if isinstance(match, tuple):
+                        params.extend([int(x) for x in match if x.isdigit()])
+                    elif match.isdigit():
+                        params.append(int(match))
+        
+        # Also look for semicolon/comma-separated numeric sequences
+        lines = payload_text.split('\n')
+        for line in lines[:10]:  # Check first 10 lines
+            # Split by semicolon or comma
+            parts = re.split('[;,]', line.strip())
+            numeric_parts = [p.strip() for p in parts if p.strip().isdigit()]
+            if len(numeric_parts) >= 5:  # At least 5 numeric parameters
+                params.extend([int(p) for p in numeric_parts])
+                break
+        
+        return {
+            'has_params': len(params) > 0,
+            'param_count': len(params),
+            'params': params[:20]  # Limit to first 20 params
+        }
+    except Exception:
+        return {'has_params': False, 'param_count': 0, 'params': []}
+
+def detect_base64_payload(payload_text):
+    """Detect base64-encoded content in payload"""
+    if not payload_text or len(payload_text) < 20:
+        return None
+    try:
+        import base64
+        # Look for base64-like strings (at least 20 chars)
+        base64_pattern = r'[A-Za-z0-9+/]{20,}={0,2}'
+        matches = re.findall(base64_pattern, payload_text)
+        
+        for match in matches[:5]:  # Check first 5 matches
+            if len(match) >= 20:
+                try:
+                    # Try to decode
+                    decoded = base64.b64decode(match, validate=True).decode(errors='ignore')
+                    # Check if decoded content contains IP:port patterns
+                    ip_ports = extract_ip_port_lists_from_payload(decoded)
+                    if len(ip_ports) >= 3:
+                        return decoded[:500]  # Return decoded content (limited)
+                except Exception:
+                    continue
+        return None
+    except Exception:
+        return None
+
+def detect_c2_payload_patterns(http_df, tcp_df):
+    """Detect C2 command patterns in HTTP payloads"""
+    rows = []
+    if http_df.empty or 'PAYLOAD' not in http_df.columns:
+        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','IP_COUNT','PARAM_COUNT','PAYLOAD_EXCERPT'])
+    
+    try:
+        for _, row in http_df.iterrows():
+            payload = row.get('PAYLOAD', '')
+            if not payload or len(payload) < 10:
+                continue
+            
+            src_ip = row.get('SRC_IP', '')
+            domain = row.get('DOMAIN', '')
+            ts = row.get('TS', 0)
+            
+            # Extract IP:port lists
+            ip_ports = extract_ip_port_lists_from_payload(payload)
+            ip_count = len(ip_ports)
+            
+            # Detect numeric parameters
+            param_info = detect_attack_command_parameters(payload)
+            param_count = param_info['param_count']
+            
+            # Check for base64-encoded commands
+            decoded_payload = detect_base64_payload(payload)
+            if decoded_payload:
+                # Re-analyze decoded payload
+                decoded_ip_ports = extract_ip_port_lists_from_payload(decoded_payload)
+                if len(decoded_ip_ports) > ip_count:
+                    ip_ports = decoded_ip_ports
+                    ip_count = len(ip_ports)
+            
+            # Scoring based on patterns detected
+            score = 0
+            detection_type = ''
+            
+            if ip_count >= 5 and ip_count < 10:
+                score = 85
+                detection_type = 'C2 Attack Command (5+ targets)'
+            elif ip_count >= 10:
+                score = 95
+                detection_type = 'C2 Attack Command (10+ targets)'
+            
+            # Bonus for parameter sequences
+            if ip_count >= 5 and param_count >= 5:
+                score = min(98, score + 10)
+                detection_type = 'C2 Attack Command (IP list + parameters)'
+            
+            # Check for known botnet patterns
+            botnet_keywords = ['mirai', 'gafgyt', 'qbot', 'emotet', 'trickbot']
+            payload_lower = payload.lower()
+            if any(keyword in payload_lower for keyword in botnet_keywords):
+                score = 99
+                detection_type = 'Known Botnet C2 Command'
+            
+            # Only create alert if score is high enough
+            if score >= 85:
+                # Create payload excerpt for display
+                excerpt = payload[:200].replace('\n', ' ').replace('\r', '')
+                if len(payload) > 200:
+                    excerpt += '...'
+                
+                rows.append({
+                    'INDICATOR': f'{src_ip} → {domain}',
+                    'TYPE': detection_type,
+                    'SCORE': score,
+                    'COUNT': 1,
+                    'SRC_IP': src_ip,
+                    'DST_IP': '',  # HTTP doesn't have direct DST_IP in aggregated form
+                    'IP_COUNT': ip_count,
+                    'PARAM_COUNT': param_count,
+                    'PAYLOAD_EXCERPT': excerpt,
+                    'TS': ts
+                })
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','IP_COUNT','PARAM_COUNT','PAYLOAD_EXCERPT'])
+
+def correlate_c2_commands_to_attacks(c2_commands_df, tcp_df, time_window=300):
+    """Correlate C2 commands with subsequent traffic spikes within time window"""
+    rows = []
+    
+    try:
+        if c2_commands_df.empty or tcp_df.empty:
+            return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','C2_TIME','ATTACK_TIME','TIME_DELTA','SRC_IP','DST_IP'])
+        
+        if 'TS' not in c2_commands_df.columns or 'TS' not in tcp_df.columns:
+            return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','C2_TIME','ATTACK_TIME','TIME_DELTA','SRC_IP','DST_IP'])
+        
+        # For each C2 command, look for traffic spikes within time window
+        for _, c2_row in c2_commands_df.iterrows():
+            c2_time = c2_row.get('TS', 0)
+            c2_src = c2_row.get('SRC_IP', '')
+            
+            if not c2_src or c2_time == 0:
+                continue
+            
+            # Look for traffic from same source within time window
+            time_mask = (tcp_df['TS'] >= c2_time) & (tcp_df['TS'] <= c2_time + time_window)
+            src_mask = tcp_df['SRC_IP'] == c2_src
+            
+            relevant_traffic = tcp_df[time_mask & src_mask]
+            
+            if len(relevant_traffic) >= 50:  # Significant traffic increase
+                # Calculate time delta
+                attack_time = relevant_traffic['TS'].min()
+                time_delta = int(attack_time - c2_time)
+                
+                rows.append({
+                    'INDICATOR': f'C2→Attack: {c2_src}',
+                    'TYPE': 'C2 Command Followed by Attack',
+                    'SCORE': 90,
+                    'C2_TIME': c2_time,
+                    'ATTACK_TIME': attack_time,
+                    'TIME_DELTA': time_delta,
+                    'SRC_IP': c2_src,
+                    'DST_IP': ''
+                })
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','C2_TIME','ATTACK_TIME','TIME_DELTA','SRC_IP','DST_IP'])
 
 # -----------------------
 # DDoS Detection Functions
@@ -1138,6 +1366,7 @@ const timelineData  = %%TIMELINE%%;
 
 const c2Data        = %%C2GRAPH%%;   // compact subset exclusively for the graph
 const c2FullData    = %%C2FULL%%;    // complete heuristic table dataset
+const c2CommandsData = %%C2COMMANDS%%; // C2 payload detection results
 
 const advData       = %%ADV%%;
 const beaconData    = %%BEACON%%;
@@ -1362,6 +1591,10 @@ function updateDashboard(){
   const ddosSlice = (ddosData||[]).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
   renderTableRows(document.querySelector('#tbl_ddos tbody'), ddosSlice, ['INDICATOR','TYPE','SCORE','COUNT']);
 
+  // C2 Commands Detection table
+  const c2CommandsSlice = (c2CommandsData||[]).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  renderTableRows(document.querySelector('#tbl_c2_commands tbody'), c2CommandsSlice, ['INDICATOR','TYPE','SCORE','IP_COUNT','PARAM_COUNT','PAYLOAD_EXCERPT']);
+
   // ------------------------
   // PIVOT
   // ------------------------
@@ -1519,6 +1752,11 @@ body.dark #c2graph, body.dark #ddosgraph, body.dark #heatmap_canvas { background
     </div>
 
     <div style='margin-top:18px' class='card'>
+      <h3>C2 Commands Detected (HTTP Payload Analysis)</h3>
+      <div class='table-wrap'><table id='tbl_c2_commands' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>IP_COUNT</th><th>PARAM_COUNT</th><th>PAYLOAD_EXCERPT</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <div style='margin-top:18px' class='card'>
       <h3>Advanced Heuristics</h3>
       <div class='table-wrap'><table id='tbl_adv' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
 
@@ -1587,8 +1825,8 @@ def pipeline(pcap=FILE_PCAP):
                     timeline[key] = timeline.get(key, 0) + 1
         timeline_list = [{'label': k, 'count': v} for k, v in sorted(timeline.items())]
 
-        print("[7/14] Computing full C2 heuristic indicators...")
-        c2_full = compute_c2_heuristics(dnsA, httpA, tlsA, tcpA)
+        print("[7/14] Computing full C2 heuristic indicators (with payload analysis)...")
+        c2_full = compute_c2_heuristics(dnsA, httpA, tlsA, tcpA, http_full=http)
 
         # Build graph subset (filtered) for readable graph
         print("[8/14] Preparing compact C2 dataset for graph (filter + cap)...")
@@ -1600,6 +1838,8 @@ def pipeline(pcap=FILE_PCAP):
             "High-Entropy SNI + Rare JA3",
             "High-Entropy DNS",
             "Rare JA3 Fingerprint",
+            "C2 Attack Command",  # Add C2 payload detections
+            "Known Botnet C2",
         ]
 
         def is_graph_worthy_row(r):
@@ -1641,11 +1881,19 @@ def pipeline(pcap=FILE_PCAP):
         print("[11/14] Detecting DNS Tunneling...")
         dnstunnel = detect_dnstunneling(dns)
         
-        print("[12/14] Computing DDoS Attack Heuristics...")
+        print("[12/14] Extracting C2 Payload Commands...")
+        # Extract C2 command detections from c2_full for separate display
+        if not c2_full.empty:
+            c2_commands = c2_full[c2_full['TYPE'].str.contains('C2 Attack Command|Known Botnet C2', na=False, case=False)].copy()
+        else:
+            c2_commands = pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP'])
+        print(f"  - C2 command detections: {len(c2_commands)}")
+        
+        print("[13/14] Computing DDoS Attack Heuristics...")
         ddos = compute_ddos_heuristics(tcp, udp, icmp, http, dns_detail, c2_full)
         print(f"  - DDoS detections: {len(ddos)}")
         
-        print("[13/14] Preparing DDoS graph subset...")
+        print("[14/14] Preparing DDoS graph subset...")
         # Create graph-worthy DDoS subset (similar to C2 graph logic)
         if not ddos.empty:
             ddos_graph = ddos[ddos['SCORE'] >= GRAPH_MIN_SCORE].copy()
@@ -1656,7 +1904,11 @@ def pipeline(pcap=FILE_PCAP):
         print(f"  - ddos_graph rows: {len(ddos_graph)}")
 
         # Build JS and HTML files
-        print("[14/14] Writing dashboard.js and dashboard.html ...")
+        print("[15/15] Writing dashboard.js and dashboard.html ...")
+        
+        # Get detailed C2 command data from http if available
+        c2_commands_detailed = detect_c2_payload_patterns(http, tcp) if not http.empty else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','IP_COUNT','PARAM_COUNT','PAYLOAD_EXCERPT'])
+        
         js = (
             JS_TEMPLATE
             .replace('%%DNS%%', safe_js_json(dnsA.to_dict(orient='records')))
@@ -1666,6 +1918,7 @@ def pipeline(pcap=FILE_PCAP):
             .replace('%%TIMELINE%%', safe_js_json(timeline_list))
             .replace('%%C2GRAPH%%', safe_js_json(c2_graph.to_dict(orient='records')))
             .replace('%%C2FULL%%', safe_js_json(c2_full.to_dict(orient='records')))
+            .replace('%%C2COMMANDS%%', safe_js_json(c2_commands_detailed.to_dict(orient='records')))
             .replace('%%ADV%%', safe_js_json(adv.to_dict(orient='records')))
             .replace('%%BEACON%%', safe_js_json(beacon.to_dict(orient='records')))
             .replace('%%DNSTUNNEL%%', safe_js_json(dnstunnel.to_dict(orient='records')))
