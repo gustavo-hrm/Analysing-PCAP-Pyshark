@@ -48,6 +48,7 @@ STANDARD_HTTP_PORTS = {80, 8080, 8000, 8888}  # Standard HTTP ports
 # Utilities
 # -----------------------
 def shannon_entropy(s):
+    """Calculate Shannon entropy of a string for randomness detection."""
     if not s: return 0.0
     s = str(s)
     probs = [s.count(c) / len(s) for c in set(s)]
