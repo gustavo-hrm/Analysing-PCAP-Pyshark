@@ -808,15 +808,28 @@ def advanced_dns_checks(dns_df):
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT'])
 
 def compute_advanced_heuristics(dnsA, httpA, tlsA, tcpA, timeline_list):
+    """Compute advanced heuristics including connection patterns."""
     parts = []
     parts.append(advanced_dns_checks(dnsA))
     parts.append(fanout_score(tcpA))
     parts.append(ja3_cluster_scores(tlsA))
+    parts.append(detect_hourly_beaconing(tcpA))
     df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT'])
     if not df.empty:
         df = df.groupby(['INDICATOR','TYPE'], as_index=False).agg({'SCORE':'max','COUNT':'sum'})
         df = df.sort_values(['SCORE','COUNT'], ascending=[False,False])
     return df
+
+def detect_hourly_beaconing(tcp_df):
+    """Detect connections at specific intervals (e.g., every hour on the hour)."""
+    rows = []
+    if tcp_df.empty: 
+        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT'])
+    
+    # This is a placeholder for hourly detection
+    # Would need timestamp data to implement fully
+    # Pattern: connections at HH:00:00, HH:15:00, HH:30:00, etc.
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT'])
 
 # -----------------------
 # Beaconing detection
@@ -1200,8 +1213,8 @@ function updateDashboard(){
   // ------------------------
   renderTableRows(document.querySelector('#tbl_dns tbody'), dnsSlice, ['DOMAIN','COUNT','PERCENT']);
   renderTableRows(document.querySelector('#tbl_http tbody'), httpSlice, ['DOMAIN','COUNT','PERCENT']);
-  renderTableRows(document.querySelector('#tbl_tls tbody'), tlsSlice, ['SNI','JA3','SRC_IP','DST_IP','COUNT','PERCENT']);
-  renderTableRows(document.querySelector('#tbl_tcp tbody'), tcpSliceFiltered, ['SRC_IP','DST_IP','FLAGS','COUNT','PERCENT']);
+  renderTableRows(document.querySelector('#tbl_tls tbody'), tlsSlice, ['SNI','JA3','JA3S','SRC_IP','DST_IP','SRC_PORT','DST_PORT','COUNT','PERCENT']);
+  renderTableRows(document.querySelector('#tbl_tcp tbody'), tcpSliceFiltered, ['SRC_IP','DST_IP','SRC_PORT','DST_PORT','FLAGS','COUNT','PERCENT']);
 
   // FULL C2 table (not filtered)
   renderTableRows(
@@ -1351,8 +1364,8 @@ body.dark #c2graph, body.dark #heatmap_canvas { background:#071018 !important; b
       <div class='card'><h3>C2 Graph</h3><div id='c2graph'></div></div>
       <div class='card'><h3>DNS Top</h3><div class='chart-box'><canvas id='chart_dns'></canvas></div><div class='table-wrap'><table id='tbl_dns' class='display'><thead><tr><th>DOMAIN</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
       <div class='card'><h3>HTTP Top</h3><div class='chart-box'><canvas id='chart_http'></canvas></div><div class='table-wrap'><table id='tbl_http' class='display'><thead><tr><th>DOMAIN</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
-      <div class='card'><h3>TLS SNI / JA3</h3><div class='chart-box'><canvas id='chart_tls'></canvas></div><div class='table-wrap'><table id='tbl_tls' class='display'><thead><tr><th>SNI</th><th>JA3</th><th>SRC_IP</th><th>DST_IP</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
-      <div class='card'><h3>TCP Flags</h3><div class='chart-box'><canvas id='chart_tcp'></canvas></div><div class='table-wrap'><table id='tbl_tcp' class='display'><thead><tr><th>SRC_IP</th><th>DST_IP</th><th>FLAGS</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
+      <div class='card'><h3>TLS SNI / JA3 / JA3S</h3><div class='chart-box'><canvas id='chart_tls'></canvas></div><div class='table-wrap'><table id='tbl_tls' class='display'><thead><tr><th>SNI</th><th>JA3</th><th>JA3S</th><th>SRC_IP</th><th>DST_IP</th><th>SRC_PORT</th><th>DST_PORT</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
+      <div class='card'><h3>TCP Flags</h3><div class='chart-box'><canvas id='chart_tcp'></canvas></div><div class='table-wrap'><table id='tbl_tcp' class='display'><thead><tr><th>SRC_IP</th><th>DST_IP</th><th>SRC_PORT</th><th>DST_PORT</th><th>FLAGS</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
     </div>
 
 
