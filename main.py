@@ -192,6 +192,7 @@ def parse_streams(pcap_path):
     udp_rows = []
     icmp_rows = []
     dns_detail_rows = []  # For amplification detection
+    http_payload_rows = []  # For HTTP C2 target distribution detection
 
     if not PcapReader:
         # scapy not available: return empty frames with expected columns
@@ -202,7 +203,8 @@ def parse_streams(pcap_path):
             pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS'])
+            pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','PAYLOAD','TS','IS_RESPONSE'])
         )
 
     if not os.path.exists(pcap_path):
@@ -213,7 +215,8 @@ def parse_streams(pcap_path):
             pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE']),
             pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS'])
+            pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','PAYLOAD','TS','IS_RESPONSE'])
         )
 
     with PcapReader(pcap_path) as rdr:
@@ -289,6 +292,18 @@ def parse_streams(pcap_path):
                         try:
                             txt = payload.decode(errors='ignore')
                             http_match = re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', txt)
+                            is_response = txt.startswith('HTTP/')
+                            
+                            if http_match or is_response:
+                                # Store full payload for C2 target distribution analysis
+                                http_payload_rows.append({
+                                    'SRC_IP': src,
+                                    'DST_IP': dst,
+                                    'PAYLOAD': txt[:4096],  # Limit payload size
+                                    'TS': ts,
+                                    'IS_RESPONSE': is_response
+                                })
+                            
                             if http_match:
                                 method = http_match.group(1)
                                 lines = txt.splitlines()
@@ -364,8 +379,9 @@ def parse_streams(pcap_path):
     udp_df = pd.DataFrame(udp_rows) if udp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE'])
     icmp_df = pd.DataFrame(icmp_rows) if icmp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE'])
     dns_detail_df = pd.DataFrame(dns_detail_rows) if dns_detail_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS'])
+    http_payload_df = pd.DataFrame(http_payload_rows) if http_payload_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','PAYLOAD','TS','IS_RESPONSE'])
     
-    return dns_df, tcp_df, http_df, tls_df, udp_df, icmp_df, dns_detail_df
+    return dns_df, tcp_df, http_df, tls_df, udp_df, icmp_df, dns_detail_df, http_payload_df
 
 # -----------------------
 # Aggregator helper
@@ -1073,7 +1089,181 @@ def correlate_c2_to_ddos(c2_df, ddos_df, tcp_df):
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','C2_IP','BOT_COUNT','ATTACK_TYPE','TIME_DELTA','SRC_IP','DST_IP'])
 
 
-def compute_ddos_heuristics(tcp_df, udp_df, icmp_df, http_df, dns_detail_df, c2_df):
+def detect_http_target_distribution(http_payload_df, tcp_df, ddos_df):
+    """
+    Detect HTTP-based botnet C2 target distribution patterns.
+    Analyzes HTTP payloads for IP address lists that may be distributed to bots
+    as attack targets, then correlates with actual DDoS attacks.
+    """
+    rows = []
+    
+    if http_payload_df.empty:
+        return pd.DataFrame(columns=[
+            'INDICATOR','TYPE','SCORE','C2_SERVER','BOT_COUNT',
+            'TARGETS_IN_PAYLOAD','TARGETS_ATTACKED','CORRELATION_SCORE',
+            'TIME_TO_ATTACK','SRC_IP','DST_IP'
+        ])
+    
+    try:
+        # IPv4 pattern: more permissive to catch various formats
+        ipv4_pattern = re.compile(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b')
+        # IPv6 pattern (simplified)
+        ipv6_pattern = re.compile(r'\b([0-9a-fA-F]{1,4}:[0-9a-fA-F:]+)\b')
+        
+        # Extract IPs from HTTP responses (potential C2 commands)
+        c2_commands = {}  # {c2_server: {timestamp: [target_ips], bots: set()}}
+        
+        for _, row in http_payload_df.iterrows():
+            if not row['IS_RESPONSE']:
+                continue  # Only analyze responses (server -> client)
+            
+            payload = row.get('PAYLOAD', '')
+            if not payload or len(payload) < 20:
+                continue
+            
+            # Extract IPs from payload
+            ipv4_matches = ipv4_pattern.findall(payload)
+            ipv6_matches = ipv6_pattern.findall(payload)
+            all_ips = list(set(ipv4_matches + ipv6_matches))
+            
+            # Filter out common false positives
+            filtered_ips = []
+            for ip in all_ips:
+                # Skip localhost, broadcast, and invalid IPs
+                if ip.startswith('127.') or ip.startswith('255.') or ip == '0.0.0.0':
+                    continue
+                # Skip version numbers (e.g., 1.0.0.0)
+                if ip.startswith('1.0.') or ip.startswith('2.0.'):
+                    continue
+                filtered_ips.append(ip)
+            
+            # Only consider payloads with multiple IPs (likely target lists)
+            if len(filtered_ips) >= 2:
+                c2_server = row['SRC_IP']  # Server sending the response
+                bot_ip = row['DST_IP']      # Client receiving the response
+                timestamp = row['TS']
+                
+                if c2_server not in c2_commands:
+                    c2_commands[c2_server] = {'commands': [], 'bots': set()}
+                
+                c2_commands[c2_server]['commands'].append({
+                    'timestamp': timestamp,
+                    'targets': filtered_ips,
+                    'bot': bot_ip
+                })
+                c2_commands[c2_server]['bots'].add(bot_ip)
+        
+        # Analyze each potential C2 server
+        for c2_server, data in c2_commands.items():
+            commands = data['commands']
+            bots = data['bots']
+            
+            # Need at least 2 bots receiving commands to consider it a botnet
+            if len(bots) < 2:
+                continue
+            
+            # Aggregate all distributed targets
+            all_distributed_targets = set()
+            earliest_command_time = None
+            
+            for cmd in commands:
+                all_distributed_targets.update(cmd['targets'])
+                if earliest_command_time is None or cmd['timestamp'] < earliest_command_time:
+                    earliest_command_time = cmd['timestamp']
+            
+            if len(all_distributed_targets) == 0:
+                continue
+            
+            # Correlate with DDoS attacks
+            targets_attacked = set()
+            time_to_attack = None
+            
+            if not ddos_df.empty and 'DST_IP' in ddos_df.columns:
+                # Get attack victim IPs
+                attack_victims = set(ddos_df['DST_IP'].dropna().unique())
+                
+                # Find overlap
+                targets_attacked = all_distributed_targets.intersection(attack_victims)
+                
+                # Calculate time to attack for correlated targets
+                if targets_attacked and 'TS' in tcp_df.columns:
+                    # Find earliest attack against distributed targets
+                    for victim in targets_attacked:
+                        victim_attacks = tcp_df[tcp_df['DST_IP'] == victim]
+                        if not victim_attacks.empty:
+                            earliest_attack = victim_attacks['TS'].min()
+                            if earliest_command_time:
+                                delta = earliest_attack - earliest_command_time
+                                if delta >= 0 and (time_to_attack is None or delta < time_to_attack):
+                                    time_to_attack = delta
+            
+            # Calculate correlation score
+            if len(all_distributed_targets) > 0:
+                match_rate = len(targets_attacked) / len(all_distributed_targets)
+            else:
+                match_rate = 0
+            
+            # Calculate final score
+            base_score = 90
+            
+            # Bonus for high match rate
+            match_bonus = int(match_rate * 8)  # up to +8
+            
+            # Bonus for number of bots
+            bot_bonus = min(5, len(bots) // 3)  # up to +5
+            
+            # Bonus for timing correlation (attack shortly after command)
+            timing_bonus = 0
+            if time_to_attack is not None and time_to_attack <= C2_TO_DDOS_CORRELATION_WINDOW:
+                timing_bonus = 5
+            
+            score = min(98, base_score + match_bonus + bot_bonus + timing_bonus)
+            
+            # Only report high-confidence detections
+            if score >= 90 or (len(targets_attacked) > 0 and len(bots) >= 3):
+                # Format time to attack
+                time_str = "N/A"
+                if time_to_attack is not None:
+                    if time_to_attack < 60:
+                        time_str = f"{int(time_to_attack)}s"
+                    else:
+                        time_str = f"{int(time_to_attack/60)}m {int(time_to_attack%60)}s"
+                
+                # Format correlation
+                correlation_str = f"{int(match_rate*100)}% match"
+                if len(targets_attacked) > 0:
+                    correlation_str += f" ({len(targets_attacked)}/{len(all_distributed_targets)})"
+                
+                # Format targets
+                targets_str = ", ".join(sorted(list(all_distributed_targets))[:5])
+                if len(all_distributed_targets) > 5:
+                    targets_str += f" +{len(all_distributed_targets)-5} more"
+                
+                rows.append({
+                    'INDICATOR': f'{c2_server} → Target List Distribution',
+                    'TYPE': 'HTTP C2 Target Distribution',
+                    'SCORE': score,
+                    'C2_SERVER': c2_server,
+                    'BOT_COUNT': len(bots),
+                    'TARGETS_IN_PAYLOAD': len(all_distributed_targets),
+                    'TARGETS_ATTACKED': len(targets_attacked),
+                    'CORRELATION_SCORE': correlation_str,
+                    'TIME_TO_ATTACK': time_str,
+                    'SRC_IP': c2_server,
+                    'DST_IP': ''  # Multiple destinations (bots)
+                })
+    
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
+        'INDICATOR','TYPE','SCORE','C2_SERVER','BOT_COUNT',
+        'TARGETS_IN_PAYLOAD','TARGETS_ATTACKED','CORRELATION_SCORE',
+        'TIME_TO_ATTACK','SRC_IP','DST_IP'
+    ])
+
+
+def compute_ddos_heuristics(tcp_df, udp_df, icmp_df, http_df, dns_detail_df, c2_df, http_payload_df=None):
     """Compute all DDoS detection heuristics"""
     parts = []
     
@@ -1115,6 +1305,12 @@ def compute_ddos_heuristics(tcp_df, udp_df, icmp_df, http_df, dns_detail_df, c2_
     if not c2_ddos_corr.empty:
         df = pd.concat([c2_ddos_corr, df], ignore_index=True)
     
+    # Add HTTP C2 Target Distribution detection
+    if http_payload_df is not None and not http_payload_df.empty:
+        http_c2_dist = detect_http_target_distribution(http_payload_df, tcp_df, df)
+        if not http_c2_dist.empty:
+            df = pd.concat([http_c2_dist, df], ignore_index=True)
+    
     return df
 
 # -----------------------
@@ -1146,6 +1342,9 @@ const dnstunnelData = %%DNSTUNNEL%%;
 // DDoS Detection Data
 const ddosData      = %%DDOS%%;      // all DDoS detections
 const ddosGraphData = %%DDOSGRAPH%%; // DDoS graph subset
+
+// HTTP C2 Target Distribution Data
+const httpC2Data    = %%HTTPC2%%;    // HTTP C2 target distribution detections
 
 
 // ------------------------------------------------------------
@@ -1361,6 +1560,10 @@ function updateDashboard(){
   // DDoS Detection table
   const ddosSlice = (ddosData||[]).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
   renderTableRows(document.querySelector('#tbl_ddos tbody'), ddosSlice, ['INDICATOR','TYPE','SCORE','COUNT']);
+  
+  // HTTP C2 Target Distribution table
+  const httpC2Slice = (httpC2Data||[]).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  renderTableRows(document.querySelector('#tbl_http_c2 tbody'), httpC2Slice, ['C2_SERVER','BOT_COUNT','TARGETS_IN_PAYLOAD','TARGETS_ATTACKED','CORRELATION_SCORE','TIME_TO_ATTACK','SCORE']);
 
   // ------------------------
   // PIVOT
@@ -1519,6 +1722,11 @@ body.dark #c2graph, body.dark #ddosgraph, body.dark #heatmap_canvas { background
     </div>
 
     <div style='margin-top:18px' class='card'>
+      <h3>HTTP C2 Target Distribution</h3>
+      <div class='table-wrap'><table id='tbl_http_c2' class='display'><thead><tr><th>C2_SERVER</th><th>BOT_COUNT</th><th>TARGETS_IN_PAYLOAD</th><th>TARGETS_ATTACKED</th><th>CORRELATION_SCORE</th><th>TIME_TO_ATTACK</th><th>SCORE</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <div style='margin-top:18px' class='card'>
       <h3>Advanced Heuristics</h3>
       <div class='table-wrap'><table id='tbl_adv' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
 
@@ -1557,26 +1765,26 @@ def pipeline(pcap=FILE_PCAP):
     try:
         print("\n=== Stability v20.3: Starting pipeline with DDoS Detection ===\n")
 
-        print("[1/14] Parsing PCAP (enhanced for DDoS detection)...")
-        dns, tcp, http, tls, udp, icmp, dns_detail = parse_streams(pcap)
+        print("[1/15] Parsing PCAP (enhanced for DDoS and HTTP C2 detection)...")
+        dns, tcp, http, tls, udp, icmp, dns_detail, http_payload = parse_streams(pcap)
 
-        print("[2/14] Aggregating DNS...")
+        print("[2/15] Aggregating DNS...")
         dnsA = agg(dns, ['DOMAIN'])
 
-        print("[3/14] Aggregating HTTP...")
+        print("[3/15] Aggregating HTTP...")
         httpA = agg(http, ['DOMAIN'])
 
-        print("[4/14] Aggregating TLS (ensure columns exist)...")
+        print("[4/15] Aggregating TLS (ensure columns exist)...")
         tls_cols = ['SNI', 'JA3', 'SRC_IP', 'DST_IP']
         for col in tls_cols:
             if col not in tls.columns:
                 tls[col] = None
         tlsA = agg(tls, tls_cols)
 
-        print("[5/14] Aggregating TCP...")
+        print("[5/15] Aggregating TCP...")
         tcpA = agg(tcp, ['SRC_IP', 'DST_IP', 'FLAGS'])
 
-        print("[6/14] Building HTTP Timeline...")
+        print("[6/15] Building HTTP Timeline...")
         timeline = {}
         if os.path.exists(pcap) and PcapReader:
             # Use http dataframe if it already has timestamps
@@ -1587,11 +1795,11 @@ def pipeline(pcap=FILE_PCAP):
                     timeline[key] = timeline.get(key, 0) + 1
         timeline_list = [{'label': k, 'count': v} for k, v in sorted(timeline.items())]
 
-        print("[7/14] Computing full C2 heuristic indicators...")
+        print("[7/15] Computing full C2 heuristic indicators...")
         c2_full = compute_c2_heuristics(dnsA, httpA, tlsA, tcpA)
 
         # Build graph subset (filtered) for readable graph
-        print("[8/14] Preparing compact C2 dataset for graph (filter + cap)...")
+        print("[8/15] Preparing compact C2 dataset for graph (filter + cap)...")
 
         # pick only "graph-worthy" types and high scores, but keep fallback to some rows if empty
         important_prefixes = [
@@ -1632,20 +1840,25 @@ def pipeline(pcap=FILE_PCAP):
         print(f"  - c2_full rows: {len(c2_full)}")
         print(f"  - c2_graph rows (graph): {len(c2_graph)}")
 
-        print("[9/14] Computing Advanced Heuristics...")
+        print("[9/15] Computing Advanced Heuristics...")
         adv = compute_advanced_heuristics(dnsA, httpA, tlsA, tcpA, timeline_list)
 
-        print("[10/14] Detecting Beaconing...")
+        print("[10/15] Detecting Beaconing...")
         beacon = detect_beaconing(tcp)
 
-        print("[11/14] Detecting DNS Tunneling...")
+        print("[11/15] Detecting DNS Tunneling...")
         dnstunnel = detect_dnstunneling(dns)
         
-        print("[12/14] Computing DDoS Attack Heuristics...")
-        ddos = compute_ddos_heuristics(tcp, udp, icmp, http, dns_detail, c2_full)
+        print("[12/15] Computing DDoS Attack Heuristics (with HTTP C2 detection)...")
+        ddos = compute_ddos_heuristics(tcp, udp, icmp, http, dns_detail, c2_full, http_payload)
         print(f"  - DDoS detections: {len(ddos)}")
         
-        print("[13/14] Preparing DDoS graph subset...")
+        print("[13/15] Extracting HTTP C2 Target Distribution detections...")
+        # Extract HTTP C2 detections for dedicated display
+        http_c2 = ddos[ddos['TYPE'] == 'HTTP C2 Target Distribution'].copy() if not ddos.empty and 'TYPE' in ddos.columns else pd.DataFrame()
+        print(f"  - HTTP C2 target distribution detections: {len(http_c2)}")
+        
+        print("[14/15] Preparing DDoS graph subset...")
         # Create graph-worthy DDoS subset (similar to C2 graph logic)
         if not ddos.empty:
             ddos_graph = ddos[ddos['SCORE'] >= GRAPH_MIN_SCORE].copy()
@@ -1656,7 +1869,7 @@ def pipeline(pcap=FILE_PCAP):
         print(f"  - ddos_graph rows: {len(ddos_graph)}")
 
         # Build JS and HTML files
-        print("[14/14] Writing dashboard.js and dashboard.html ...")
+        print("[15/15] Writing dashboard.js and dashboard.html ...")
         js = (
             JS_TEMPLATE
             .replace('%%DNS%%', safe_js_json(dnsA.to_dict(orient='records')))
@@ -1671,6 +1884,7 @@ def pipeline(pcap=FILE_PCAP):
             .replace('%%DNSTUNNEL%%', safe_js_json(dnstunnel.to_dict(orient='records')))
             .replace('%%DDOS%%', safe_js_json(ddos.to_dict(orient='records')))
             .replace('%%DDOSGRAPH%%', safe_js_json(ddos_graph.to_dict(orient='records')))
+            .replace('%%HTTPC2%%', safe_js_json(http_c2.to_dict(orient='records')))
         )
 
         with open('dashboard.js', 'w', encoding='utf-8') as jf:
@@ -1682,7 +1896,7 @@ def pipeline(pcap=FILE_PCAP):
             hf.write(html_output)
         print("→ dashboard.html written.")
 
-        print("\n=== DONE: Stability v20.3 dashboard with DDoS detection generated ===\n")
+        print("\n=== DONE: Stability v20.3 dashboard with DDoS and HTTP C2 detection generated ===\n")
 
     except Exception:
         print("\n\n=== PIPELINE CRASH ===")
