@@ -1,8 +1,8 @@
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Stability v20.1 — Clean, modular, C2 graph fixes (graph subset + full table)
-# Usage: python3 stability_v20_1.py
+# Stability v20.2 — Enhanced C2 Detection with Advanced Heuristics
+# Usage: python3 main.py
 
 import os
 import re
