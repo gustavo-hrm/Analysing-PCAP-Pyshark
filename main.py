@@ -1947,6 +1947,7 @@ canvas{
   position: relative;
   margin-top: 8px;
   min-height: 700px;  /* ✅ Ensure minimum height */
+  flex-shrink: 0;  /* ✅ Prevent flex shrinking */
 }
 
 #c2graph::after, #ddosgraph::after {
@@ -1967,15 +1968,13 @@ canvas{
 /* Make graph cards taller */
 .card-full {
   grid-column: 1 / -1;
-  min-height: 750px;  /* ✅ Increased card minimum height to accommodate larger graphs */
+  min-height: 800px;  /* ✅ Increased to ensure enough space for graphs + padding */
 }
 
 /* Ensure card content fills available space */
 .card-full .chart-box,
-.card-full > div:not(.table-wrap) {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
+.card-full > div {
+  flex: 0 0 auto;  /* ✅ Don't flex, use explicit heights */
 }
 
 /* Special styling for graph cards */
