@@ -788,14 +788,23 @@ def detect_c2_payload_patterns(http_df, tcp_df):
     """Detect C2 command patterns in HTTP payloads"""
     rows = []
     if http_df.empty or 'PAYLOAD' not in http_df.columns:
+        print(f"  [DEBUG] C2 Payload Detection: http_df empty={http_df.empty}, has PAYLOAD={'PAYLOAD' in http_df.columns if not http_df.empty else 'N/A'}")
         return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','IP_COUNT','PARAM_COUNT','PAYLOAD_EXCERPT'])
     
+    print(f"  [DEBUG] C2 Payload Detection: Analyzing {len(http_df)} HTTP records")
+    analyzed_count = 0
+    skipped_short = 0
+    
     try:
-        for _, row in http_df.iterrows():
+        for idx, row in http_df.iterrows():
             payload = row.get('PAYLOAD', '')
-            if not payload or len(payload) < 10:
+            if not payload:
+                continue
+            if len(payload) < 10:
+                skipped_short += 1
                 continue
             
+            analyzed_count += 1
             src_ip = row.get('SRC_IP', '')
             domain = row.get('DOMAIN', '')
             ts = row.get('TS', 0)
@@ -807,6 +816,10 @@ def detect_c2_payload_patterns(http_df, tcp_df):
             # Detect numeric parameters
             param_info = detect_attack_command_parameters(payload)
             param_count = param_info['param_count']
+            
+            # Debug: Log interesting payloads
+            if ip_count > 0 or param_count > 0:
+                print(f"  [DEBUG] Interesting payload: IP count={ip_count}, Param count={param_count}, payload preview: {payload[:100]}")
             
             # Check for base64-encoded commands
             decoded_payload = detect_base64_payload(payload)
@@ -859,9 +872,13 @@ def detect_c2_payload_patterns(http_df, tcp_df):
                     'PAYLOAD_EXCERPT': excerpt,
                     'TS': ts
                 })
-    except Exception:
-        pass
+                print(f"  [DEBUG] C2 Detection: Found command - IP count: {ip_count}, Param count: {param_count}, Score: {score}")
+    except Exception as e:
+        print(f"  [DEBUG] C2 Payload Detection error: {e}")
+        import traceback
+        traceback.print_exc()
     
+    print(f"  [DEBUG] C2 Payload Detection: Analyzed {analyzed_count} payloads (skipped {skipped_short} short), found {len(rows)} C2 commands")
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','IP_COUNT','PARAM_COUNT','PAYLOAD_EXCERPT'])
 
 def correlate_c2_commands_to_attacks(c2_commands_df, tcp_df, time_window=300):
@@ -1480,6 +1497,7 @@ function renderC2Graph(containerId, data){
 
   const nodes = {};
   const edges = [];
+  const nodeScores = {};  // Track max SCORE for each node
 
   data.slice(0,500).forEach((r,i)=>{
 
@@ -1489,14 +1507,19 @@ function renderC2Graph(containerId, data){
 
     nodes[s] = (nodes[s]||0) + (r.COUNT||1);
     nodes[d] = (nodes[d]||0) + (r.COUNT||1);
+    
+    // Track highest SCORE for each node
+    const score = r.SCORE || 0;
+    nodeScores[s] = Math.max(nodeScores[s] || 0, score);
+    nodeScores[d] = Math.max(nodeScores[d] || 0, score);
 
     edges.push({
-      data:{ id:'e'+i, source:s, target:d, weight:r.COUNT||1 }
+      data:{ id:'e'+i, source:s, target:d, weight:r.COUNT||1, score:score }
     });
   });
 
   const cy_nodes = Object.keys(nodes).map(n=>({
-    data:{ id:n, label:n, weight:nodes[n] }
+    data:{ id:n, label:n + (nodeScores[n] ? '\n[' + nodeScores[n] + ']' : ''), weight:nodes[n], score:nodeScores[n] || 0 }
   }));
 
   el.innerHTML = '';
@@ -1515,18 +1538,18 @@ function renderC2Graph(containerId, data){
             'label': 'data(label)',
             'width':'mapData(weight,0,100,8,36)',
             'height':'mapData(weight,0,100,8,36)',
-            'background-color':'#1976d2',
+            'background-color':'mapData(score,0,100,#1976d2,#d32f2f)',
             'color':'#fff',
             'text-valign':'center',
             'text-halign':'center',
-            'font-size':11
+            'font-size':10
           }
         },
         {
           selector:'edge',
           style:{
             'width':'mapData(weight,0,100,1,6)',
-            'line-color':'#999',
+            'line-color':'mapData(score,0,100,#999,#ff5722)',
             'opacity':0.85
           }
         }
@@ -1907,7 +1930,11 @@ def pipeline(pcap=FILE_PCAP):
         print("[15/15] Writing dashboard.js and dashboard.html ...")
         
         # Get detailed C2 command data from http if available
+        print("  - Detecting C2 payload patterns in HTTP traffic...")
         c2_commands_detailed = detect_c2_payload_patterns(http, tcp) if not http.empty else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','IP_COUNT','PARAM_COUNT','PAYLOAD_EXCERPT'])
+        print(f"  - C2 payload command detections: {len(c2_commands_detailed)}")
+        if len(c2_commands_detailed) > 0:
+            print(f"  - Sample detection: {c2_commands_detailed.iloc[0]['TYPE']} (Score: {c2_commands_detailed.iloc[0]['SCORE']})")
         
         js = (
             JS_TEMPLATE
