@@ -1518,11 +1518,10 @@ function renderC2Graph(containerId, data){
   
   // ✅ CRITICAL: Force explicit height on container before Cytoscape initializes
   // Cytoscape reads container dimensions at initialization time
-  // If CSS hasn't been applied yet, it defaults to a tiny height (200px)
   // Setting inline style ensures the height is available immediately
-  el.style.height = '750px';
-  el.style.minHeight = '750px';
-  console.log(`Container ${containerId} forced to 750px height (was ${el.offsetHeight}px)`);
+  el.style.height = '400px';  // ✅ Changed to 400px for side-by-side layout
+  el.style.minHeight = '400px';
+  console.log(`Container ${containerId} forced to 400px height (was ${el.offsetHeight}px)`);
 
   try{
     const cy = cytoscape({
@@ -1949,18 +1948,18 @@ canvas{
   white-space:nowrap;
 }
 
-/* Graph containers - INCREASED SIZE */
+/* Graph containers - REDUCED SIZE for side-by-side layout */
 #c2graph, #ddosgraph {
   width: 100%;
-  height: 750px;  /* ✅ Increased from 700px to 750px to fill larger workspace */
+  height: 400px;  /* ✅ Reduced to 400px for side-by-side layout */
   border: 1px solid #e5e7eb;
   background: #fafbfc;
   border-radius: 8px;
   position: relative;
   margin-top: 8px;
-  min-height: 750px;  /* ✅ Ensure minimum height */
-  max-height: 750px;  /* ✅ Prevent expansion beyond intended size */
-  flex: 0 0 750px;  /* ✅ Explicit flex basis for consistent sizing */
+  min-height: 400px;
+  max-height: 400px;
+  flex: 0 0 400px;
 }
 
 #c2graph::after, #ddosgraph::after {
@@ -1978,45 +1977,25 @@ canvas{
   z-index: 1000;
 }
 
-/* Make graph cards taller */
-.card-full {
-  grid-column: 1 / -1;
-  min-height: 800px;  /* ✅ Increased to ensure enough space for graphs + padding */
+/* Graph cards for side-by-side layout */
+.card-graph {
+  min-height: 450px;  /* ✅ Accommodate 400px graph + padding + heading */
 }
 
 /* Ensure card content fills available space */
-.card-full .chart-box,
-.card-full > div {
-  flex: 0 0 auto;  /* ✅ Don't flex, use explicit heights */
+.card-graph > div {
+  flex: 0 0 auto;
 }
 
 /* Special styling for graph cards */
-.card-full h3 {
+.card-graph h3 {
   margin-bottom: 8px;
   padding-bottom: 8px;
   border-bottom: 2px solid #e5e7eb;
 }
 
-body.dark .card-full h3 {
+body.dark .card-graph h3 {
   border-bottom-color: #374151;
-}
-
-/* Remove extra spacing around graphs */
-.card-full {
-  padding: 20px;
-}
-
-@media (min-width: 1400px) {
-  #c2graph, #ddosgraph {
-    height: 850px;  /* ✅ Increased from 800px to match larger card workspace */
-    min-height: 850px;
-    max-height: 850px;
-    flex: 0 0 850px;  /* ✅ Explicit flex basis for large screens */
-  }
-  
-  .card-full {
-    min-height: 900px;  /* ✅ Increased to accommodate larger graphs */
-  }
 }
 
 /* Ensure graphs fill their containers */
@@ -2170,16 +2149,14 @@ button:hover {
   </div>
 </div>
 
-<!-- Full-width graphs -->
+<!-- Graphs side by side -->
 <div class='card-grid'>
-  <div class='card card-full'>
+  <div class='card card-graph'>
     <h3>C2 Command & Control Graph</h3>
     <div id='c2graph'></div>
   </div>
-</div>
-
-<div class='card-grid'>
-  <div class='card card-full'>
+  
+  <div class='card card-graph'>
     <h3>DDoS Attack Graph</h3>
     <div id='ddosgraph'></div>
   </div>
