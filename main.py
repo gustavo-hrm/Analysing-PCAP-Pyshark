@@ -1,8 +1,8 @@
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Stability v20.1 — Clean, modular, C2 graph fixes (graph subset + full table)
-# Usage: python3 stability_v20_1.py
+# Stability v20.3 — Comprehensive DDoS Detection Module
+# Usage: python3 main.py
 
 import os
 import re
@@ -17,11 +17,11 @@ from tqdm import tqdm
 
 # scapy import with lazy fallback if running where scapy not available for dry-run
 try:
-    from scapy.all import PcapReader, TCP, IP, Raw, DNS, DNSRR
+    from scapy.all import PcapReader, TCP, IP, Raw, DNS, DNSRR, UDP, ICMP
 except Exception:
     # allow static testing on systems without scapy; Pcap parsing will fail but code remains testable
     PcapReader = None
-    TCP = IP = Raw = DNS = DNSRR = object
+    TCP = IP = Raw = DNS = DNSRR = UDP = ICMP = object
 
 # -----------------------
 # CONFIG
@@ -35,6 +35,21 @@ TRUSTED_DOMAINS = {
 }
 MAX_GRAPH_EDGES = 50   # cap to avoid hairballs
 GRAPH_MIN_SCORE = 25    # minimal SCORE for graph-worthy indicators
+
+# -----------------------
+# DDoS Detection Thresholds
+# -----------------------
+DDOS_SYN_FLOOD_THRESHOLD = 100          # SYN packets
+DDOS_SYN_RATIO_THRESHOLD = 10.0         # SYN/ACK ratio
+DDOS_UDP_FLOOD_THRESHOLD = 500          # UDP packets/min
+DDOS_ICMP_FLOOD_THRESHOLD = 200         # ICMP packets
+DDOS_PPS_THRESHOLD = 1000               # Packets per second
+DDOS_HTTP_FLOOD_THRESHOLD = 100         # HTTP requests/min
+DDOS_AMPLIFICATION_FACTOR = 10.0        # Amplification ratio
+DDOS_MULTI_SOURCE_THRESHOLD = 10        # Sources attacking same target
+DDOS_SUSTAINED_DURATION = 300           # 5 minutes in seconds
+C2_TO_DDOS_CORRELATION_WINDOW = 300     # 5 minute correlation window
+DDOS_UDP_FLOOD_PORTS = {53, 123, 161, 1900}  # Common UDP flood ports
 
 # -----------------------
 # Utilities
@@ -166,35 +181,48 @@ def tcp_flags_str_local(pkt):
     return '+'.join(flags) if flags else 'NULL'
 
 # -----------------------
-# Single-pass PCAP parser
+# Single-pass PCAP parser (enhanced for DDoS detection)
 # -----------------------
 def parse_streams(pcap_path):
     dns_rows = []
     tcp_rows = []
     http_rows = []
     tls_rows = []
+    # New: DDoS-specific data collection
+    udp_rows = []
+    icmp_rows = []
+    dns_detail_rows = []  # For amplification detection
 
     if not PcapReader:
         # scapy not available: return empty frames with expected columns
         return (
             pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT']),
-            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT']),
-            pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT'])
+            pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT']),
+            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP']),
+            pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS'])
         )
 
     if not os.path.exists(pcap_path):
         return (
             pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT']),
-            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT']),
-            pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT'])
+            pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT']),
+            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP']),
+            pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS'])
         )
 
     with PcapReader(pcap_path) as rdr:
         for p in tqdm(rdr, desc='Single-pass PCAP'):
             try:
-                # DNS queries
+                ts = float(getattr(p, 'time', time.time()))
+                pkt_size = len(p) if hasattr(p, '__len__') else 0
+                
+                # DNS queries with amplification data
                 if getattr(p, 'haslayer', lambda x: False)(DNS):
                     try:
                         if getattr(p[DNS], 'qd', None):
@@ -202,32 +230,67 @@ def parse_streams(pcap_path):
                             q = qname.decode(errors='ignore') if isinstance(qname, (bytes,bytearray)) else str(qname)
                             domain = q.rstrip('.')
                             a = ''
-                            try:
-                                rr = p[DNS].an
-                                if isinstance(rr, DNSRR) and getattr(rr, 'rdata', None):
-                                    a = rr.rdata.decode() if isinstance(rr.rdata, (bytes,bytearray)) else str(rr.rdata)
-                            except Exception:
-                                a = ''
+                            query_size = 0
+                            response_size = 0
+                            
+                            # Get packet size info for amplification detection
+                            if getattr(p, 'haslayer', lambda x: False)(IP):
+                                src_ip = p[IP].src
+                                dst_ip = p[IP].dst
+                                query_size = pkt_size
+                                
+                                # Check if this is a response (has answer)
+                                try:
+                                    rr = p[DNS].an
+                                    if isinstance(rr, DNSRR) and getattr(rr, 'rdata', None):
+                                        a = rr.rdata.decode() if isinstance(rr.rdata, (bytes,bytearray)) else str(rr.rdata)
+                                        response_size = pkt_size
+                                except Exception:
+                                    a = ''
+                                
+                                # Store DNS detail for amplification analysis
+                                dns_detail_rows.append({
+                                    'SRC_IP': src_ip,
+                                    'DST_IP': dst_ip,
+                                    'QUERY_SIZE': query_size if not a else 0,
+                                    'RESPONSE_SIZE': response_size,
+                                    'DOMAIN': domain,
+                                    'TS': ts
+                                })
+                            
                             if not is_trusted_domain(domain):
                                 dns_rows.append({'DOMAIN':domain,'A':a,'COUNT':1,'ENTROPY':shannon_entropy(domain)})
                     except Exception:
                         pass
 
-                # TCP + IP flows
+                # TCP + IP flows with enhanced data
                 if getattr(p, 'haslayer', lambda x: False)(TCP) and getattr(p, 'haslayer', lambda x: False)(IP):
                     src = p[IP].src
                     dst = p[IP].dst
+                    src_port = p[TCP].sport
+                    dst_port = p[TCP].dport
                     flags = tcp_flags_str_local(p)
-                    tcp_rows.append({'SRC_IP':src,'DST_IP':dst,'FLAGS':flags,'COUNT':1})
+                    tcp_rows.append({
+                        'SRC_IP':src,
+                        'DST_IP':dst,
+                        'FLAGS':flags,
+                        'COUNT':1,
+                        'TS':ts,
+                        'SIZE':pkt_size,
+                        'SRC_PORT':src_port,
+                        'DST_PORT':dst_port
+                    })
 
                     # payload analysis
                     if getattr(p, 'haslayer', lambda x: False)(Raw):
                         payload = bytes(p[Raw])
 
-                        # Robust HTTP detection
+                        # Robust HTTP detection with method extraction
                         try:
                             txt = payload.decode(errors='ignore')
-                            if re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', txt):
+                            http_match = re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', txt)
+                            if http_match:
+                                method = http_match.group(1)
                                 lines = txt.splitlines()
                                 host = None
                                 for ln in lines:
@@ -241,7 +304,14 @@ def parse_streams(pcap_path):
                                             host = m2.group(2).strip(); break
                                 request_line = next((ln for ln in lines if re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', ln)), lines[0] if lines else '')
                                 if host and not is_trusted_domain(host):
-                                    http_rows.append({'DOMAIN': host, 'REQUEST': request_line, 'COUNT': 1})
+                                    http_rows.append({
+                                        'DOMAIN': host,
+                                        'REQUEST': request_line,
+                                        'COUNT': 1,
+                                        'METHOD': method,
+                                        'TS': ts,
+                                        'SRC_IP': src
+                                    })
                         except Exception:
                             pass
 
@@ -255,15 +325,47 @@ def parse_streams(pcap_path):
                                     tls_rows.append({'SNI': sni_clean, 'JA3': ja3, 'SRC_IP': src, 'DST_IP': dst, 'COUNT': 1})
                         except Exception:
                             pass
+                
+                # UDP traffic for flood detection
+                if getattr(p, 'haslayer', lambda x: False)(UDP) and getattr(p, 'haslayer', lambda x: False)(IP):
+                    src = p[IP].src
+                    dst = p[IP].dst
+                    src_port = p[UDP].sport
+                    dst_port = p[UDP].dport
+                    udp_rows.append({
+                        'SRC_IP': src,
+                        'DST_IP': dst,
+                        'SRC_PORT': src_port,
+                        'DST_PORT': dst_port,
+                        'TS': ts,
+                        'SIZE': pkt_size
+                    })
+                
+                # ICMP traffic for flood detection
+                if getattr(p, 'haslayer', lambda x: False)(ICMP) and getattr(p, 'haslayer', lambda x: False)(IP):
+                    src = p[IP].src
+                    dst = p[IP].dst
+                    icmp_type = p[ICMP].type if hasattr(p[ICMP], 'type') else 0
+                    icmp_rows.append({
+                        'SRC_IP': src,
+                        'DST_IP': dst,
+                        'ICMP_TYPE': icmp_type,
+                        'TS': ts,
+                        'SIZE': pkt_size
+                    })
 
             except Exception:
                 continue
 
     dns_df = pd.DataFrame(dns_rows) if dns_rows else pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY'])
-    tcp_df = pd.DataFrame(tcp_rows) if tcp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT'])
-    http_df = pd.DataFrame(http_rows) if http_rows else pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT'])
+    tcp_df = pd.DataFrame(tcp_rows) if tcp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT'])
+    http_df = pd.DataFrame(http_rows) if http_rows else pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP'])
     tls_df = pd.DataFrame(tls_rows) if tls_rows else pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT'])
-    return dns_df, tcp_df, http_df, tls_df
+    udp_df = pd.DataFrame(udp_rows) if udp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE'])
+    icmp_df = pd.DataFrame(icmp_rows) if icmp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE'])
+    dns_detail_df = pd.DataFrame(dns_detail_rows) if dns_detail_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS'])
+    
+    return dns_df, tcp_df, http_df, tls_df, udp_df, icmp_df, dns_detail_df
 
 # -----------------------
 # Aggregator helper
@@ -580,11 +682,447 @@ def detect_dnstunneling(dns_df):
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','NOTES'])
 
 # -----------------------
+# DDoS Detection Functions
+# -----------------------
+
+def detect_syn_flood(tcp_df):
+    """Detect SYN flood attacks by analyzing SYN/ACK ratios"""
+    rows = []
+    if tcp_df.empty or 'FLAGS' not in tcp_df.columns:
+        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','SYN_RATIO','PPS'])
+    
+    try:
+        # Group by source-destination pairs
+        for (src, dst), group in tcp_df.groupby(['SRC_IP', 'DST_IP']):
+            syn_count = len(group[group['FLAGS'].str.contains('SYN', na=False) & ~group['FLAGS'].str.contains('ACK', na=False)])
+            ack_count = len(group[group['FLAGS'].str.contains('ACK', na=False)])
+            total_count = len(group)
+            
+            # Calculate SYN/ACK ratio
+            syn_ratio = syn_count / max(1, ack_count)
+            
+            # Detect SYN flood
+            if syn_count >= DDOS_SYN_FLOOD_THRESHOLD and syn_ratio >= DDOS_SYN_RATIO_THRESHOLD:
+                # Calculate PPS if timestamps available
+                pps = 0
+                if 'TS' in group.columns:
+                    times = group['TS'].dropna()
+                    if len(times) > 1:
+                        duration = times.max() - times.min()
+                        pps = int(total_count / max(1, duration))
+                
+                # Score based on volume and ratio
+                score = min(95, 80 + int(min(15, (syn_count - DDOS_SYN_FLOOD_THRESHOLD) / 50)))
+                
+                rows.append({
+                    'INDICATOR': f'{src} → {dst}',
+                    'TYPE': 'SYN Flood Attack',
+                    'SCORE': score,
+                    'COUNT': syn_count,
+                    'SRC_IP': src,
+                    'DST_IP': dst,
+                    'SYN_RATIO': round(syn_ratio, 2),
+                    'PPS': pps
+                })
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','SYN_RATIO','PPS'])
+
+
+def detect_udp_flood(udp_df):
+    """Detect UDP flood attacks based on packet rate per source"""
+    rows = []
+    if udp_df.empty:
+        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','PPS','TARGET_PORT'])
+    
+    try:
+        for (src, dst), group in udp_df.groupby(['SRC_IP', 'DST_IP']):
+            packet_count = len(group)
+            
+            # Calculate PPS if timestamps available
+            pps = 0
+            duration = 1
+            if 'TS' in group.columns:
+                times = group['TS'].dropna()
+                if len(times) > 1:
+                    duration = times.max() - times.min()
+                    pps = int(packet_count / max(1, duration))
+            
+            # Convert to packets per minute for threshold check
+            ppm = int(pps * 60) if pps > 0 else packet_count
+            
+            if ppm >= DDOS_UDP_FLOOD_THRESHOLD:
+                # Check for common flood ports
+                target_ports = group['DST_PORT'].mode().tolist() if 'DST_PORT' in group.columns else []
+                target_port = target_ports[0] if target_ports else 0
+                port_bonus = 10 if target_port in DDOS_UDP_FLOOD_PORTS else 0
+                
+                score = min(90, 70 + int(min(20, (ppm - DDOS_UDP_FLOOD_THRESHOLD) / 100)) + port_bonus)
+                
+                rows.append({
+                    'INDICATOR': f'{src} → {dst}:{target_port}',
+                    'TYPE': 'UDP Flood Attack',
+                    'SCORE': score,
+                    'COUNT': packet_count,
+                    'SRC_IP': src,
+                    'DST_IP': dst,
+                    'PPS': pps,
+                    'TARGET_PORT': target_port
+                })
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','PPS','TARGET_PORT'])
+
+
+def detect_icmp_flood(icmp_df):
+    """Detect ICMP flood attacks (ping floods)"""
+    rows = []
+    if icmp_df.empty:
+        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP'])
+    
+    try:
+        for src, group in icmp_df.groupby('SRC_IP'):
+            packet_count = len(group)
+            
+            if packet_count >= DDOS_ICMP_FLOOD_THRESHOLD:
+                # Count echo requests (type 8)
+                echo_requests = len(group[group['ICMP_TYPE'] == 8]) if 'ICMP_TYPE' in group.columns else packet_count
+                
+                score = min(85, 65 + int(min(20, (packet_count - DDOS_ICMP_FLOOD_THRESHOLD) / 50)))
+                
+                # Get most targeted destination
+                dst_ip = group['DST_IP'].mode().tolist()[0] if 'DST_IP' in group.columns and not group.empty else ''
+                
+                rows.append({
+                    'INDICATOR': f'{src} → ICMP Flood',
+                    'TYPE': 'ICMP Flood Attack',
+                    'SCORE': score,
+                    'COUNT': packet_count,
+                    'SRC_IP': src,
+                    'DST_IP': dst_ip
+                })
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP'])
+
+
+def detect_packet_rate_anomalies(tcp_df, udp_df, icmp_df):
+    """Detect abnormal packet rates across all protocols"""
+    rows = []
+    
+    try:
+        # Combine all traffic
+        all_packets = []
+        
+        for df, proto in [(tcp_df, 'TCP'), (udp_df, 'UDP'), (icmp_df, 'ICMP')]:
+            if df.empty or 'TS' not in df.columns:
+                continue
+            for src, group in df.groupby('SRC_IP'):
+                times = group['TS'].dropna()
+                if len(times) > 1:
+                    duration = times.max() - times.min()
+                    pps = len(group) / max(1, duration)
+                    all_packets.append((src, pps, proto, len(group)))
+        
+        # Flag high packet rates
+        for src, pps, proto, count in all_packets:
+            if pps >= DDOS_PPS_THRESHOLD:
+                score = min(80, 60 + int(min(20, (pps - DDOS_PPS_THRESHOLD) / 500)))
+                rows.append({
+                    'INDICATOR': f'{src} ({proto})',
+                    'TYPE': 'High Packet Rate Anomaly',
+                    'SCORE': score,
+                    'COUNT': count,
+                    'SRC_IP': src,
+                    'DST_IP': '',
+                    'PPS': int(pps)
+                })
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','PPS'])
+
+
+def detect_dns_amplification(dns_detail_df):
+    """Detect DNS amplification attacks by analyzing query/response size ratios"""
+    rows = []
+    if dns_detail_df.empty:
+        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','AMPLIFICATION_FACTOR','VICTIM_IP','QUERY_COUNT','SRC_IP','DST_IP'])
+    
+    try:
+        # Group by victim IP (receives large responses)
+        amplification_map = {}
+        
+        for _, row in dns_detail_df.iterrows():
+            if row['RESPONSE_SIZE'] > 0 and row['QUERY_SIZE'] > 0:
+                amp_factor = row['RESPONSE_SIZE'] / max(1, row['QUERY_SIZE'])
+                if amp_factor >= DDOS_AMPLIFICATION_FACTOR:
+                    victim = row['DST_IP']
+                    if victim not in amplification_map:
+                        amplification_map[victim] = {
+                            'factors': [],
+                            'queries': 0,
+                            'domains': set(),
+                            'sources': set()
+                        }
+                    amplification_map[victim]['factors'].append(amp_factor)
+                    amplification_map[victim]['queries'] += 1
+                    amplification_map[victim]['domains'].add(row['DOMAIN'])
+                    amplification_map[victim]['sources'].add(row['SRC_IP'])
+        
+        # Create indicators for victims
+        for victim, data in amplification_map.items():
+            if data['queries'] >= 5:  # Minimum queries to consider
+                avg_factor = sum(data['factors']) / len(data['factors'])
+                score = min(95, 85 + int(min(10, (avg_factor - DDOS_AMPLIFICATION_FACTOR) / 5)))
+                
+                # Get a representative source
+                src_ip = list(data['sources'])[0] if data['sources'] else ''
+                
+                rows.append({
+                    'INDICATOR': f'DNS Amplification → {victim}',
+                    'TYPE': 'DNS Amplification Attack',
+                    'SCORE': score,
+                    'AMPLIFICATION_FACTOR': round(avg_factor, 2),
+                    'VICTIM_IP': victim,
+                    'QUERY_COUNT': data['queries'],
+                    'SRC_IP': src_ip,
+                    'DST_IP': victim
+                })
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','AMPLIFICATION_FACTOR','VICTIM_IP','QUERY_COUNT','SRC_IP','DST_IP'])
+
+
+def detect_http_flood(http_df):
+    """Detect HTTP flood attacks based on request rate"""
+    rows = []
+    if http_df.empty:
+        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','METHOD','REQUESTS_PER_MIN'])
+    
+    try:
+        for src, group in http_df.groupby('SRC_IP'):
+            request_count = len(group)
+            
+            # Calculate requests per minute
+            rpm = request_count
+            if 'TS' in group.columns:
+                times = group['TS'].dropna()
+                if len(times) > 1:
+                    duration_min = (times.max() - times.min()) / 60
+                    rpm = int(request_count / max(0.1, duration_min))
+            
+            if rpm >= DDOS_HTTP_FLOOD_THRESHOLD:
+                # Analyze request patterns
+                methods = group['METHOD'].value_counts() if 'METHOD' in group.columns else {}
+                primary_method = methods.index[0] if len(methods) > 0 else 'UNKNOWN'
+                
+                # Check for suspicious patterns (same URI repeatedly)
+                uri_diversity = len(group['REQUEST'].unique()) if 'REQUEST' in group.columns else 1
+                pattern_bonus = 10 if uri_diversity < 5 else 0
+                
+                score = min(85, 70 + int(min(15, (rpm - DDOS_HTTP_FLOOD_THRESHOLD) / 50)) + pattern_bonus)
+                
+                # Get most targeted domain
+                target = group['DOMAIN'].mode().tolist()[0] if 'DOMAIN' in group.columns and not group.empty else ''
+                
+                rows.append({
+                    'INDICATOR': f'{src} → {target}',
+                    'TYPE': f'HTTP {primary_method} Flood Attack',
+                    'SCORE': score,
+                    'COUNT': request_count,
+                    'SRC_IP': src,
+                    'DST_IP': '',
+                    'METHOD': primary_method,
+                    'REQUESTS_PER_MIN': rpm
+                })
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP','METHOD','REQUESTS_PER_MIN'])
+
+
+def detect_multi_source_attack(tcp_df, udp_df):
+    """Detect multi-source attacks targeting single destination"""
+    rows = []
+    
+    try:
+        # Combine TCP and UDP traffic
+        all_traffic = []
+        
+        for df, proto in [(tcp_df, 'TCP'), (udp_df, 'UDP')]:
+            if df.empty:
+                continue
+            for dst, group in df.groupby('DST_IP'):
+                unique_sources = group['SRC_IP'].nunique() if 'SRC_IP' in group.columns else 0
+                total_packets = len(group)
+                all_traffic.append((dst, unique_sources, total_packets, proto))
+        
+        # Detect multi-source attacks
+        for dst, source_count, packet_count, proto in all_traffic:
+            if source_count >= DDOS_MULTI_SOURCE_THRESHOLD:
+                score = min(95, 80 + int(min(15, (source_count - DDOS_MULTI_SOURCE_THRESHOLD) / 5)))
+                
+                rows.append({
+                    'INDICATOR': f'Coordinated Attack → {dst}',
+                    'TYPE': f'Multi-Source DDoS ({proto})',
+                    'SCORE': score,
+                    'SOURCE_COUNT': source_count,
+                    'TARGET_IP': dst,
+                    'TOTAL_PACKETS': packet_count,
+                    'SRC_IP': '',
+                    'DST_IP': dst
+                })
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','SOURCE_COUNT','TARGET_IP','TOTAL_PACKETS','SRC_IP','DST_IP'])
+
+
+def detect_botnet_signatures(tcp_df, udp_df):
+    """Detect botnet signatures through payload similarity and timing"""
+    rows = []
+    
+    try:
+        # Analyze TCP traffic for coordinated patterns
+        if not tcp_df.empty and 'TS' in tcp_df.columns and 'SIZE' in tcp_df.columns:
+            # Group by destination and look for synchronized sources
+            for dst, group in tcp_df.groupby('DST_IP'):
+                if len(group) < 50:  # Need enough samples
+                    continue
+                
+                # Check for similar packet sizes from multiple sources
+                size_groups = group.groupby('SIZE')['SRC_IP'].nunique()
+                coordinated_sizes = size_groups[size_groups >= 5]  # 5+ sources with same size
+                
+                if len(coordinated_sizes) > 0:
+                    unique_sources = group['SRC_IP'].nunique()
+                    
+                    if unique_sources >= 5:
+                        score = min(95, 85 + int(min(10, unique_sources / 3)))
+                        
+                        rows.append({
+                            'INDICATOR': f'Botnet Pattern → {dst}',
+                            'TYPE': 'Botnet Signature Detection',
+                            'SCORE': score,
+                            'SOURCE_COUNT': unique_sources,
+                            'PATTERN': f'{len(coordinated_sizes)} coordinated packet sizes',
+                            'SRC_IP': '',
+                            'DST_IP': dst
+                        })
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','SOURCE_COUNT','PATTERN','SRC_IP','DST_IP'])
+
+
+def correlate_c2_to_ddos(c2_df, ddos_df, tcp_df):
+    """Correlate C2 communications with DDoS attacks based on timing and IPs"""
+    rows = []
+    
+    try:
+        if c2_df.empty or ddos_df.empty:
+            return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','C2_IP','BOT_COUNT','ATTACK_TYPE','TIME_DELTA','SRC_IP','DST_IP'])
+        
+        # Extract C2 IPs and timestamps (if available)
+        c2_ips = set()
+        for _, row in c2_df.iterrows():
+            if row.get('SRC_IP'):
+                c2_ips.add(row['SRC_IP'])
+            if row.get('DST_IP'):
+                c2_ips.add(row['DST_IP'])
+        
+        # Check for overlap between C2 participants and DDoS sources
+        if not tcp_df.empty and 'SRC_IP' in tcp_df.columns:
+            ddos_sources = set(ddos_df['SRC_IP'].dropna().unique()) if 'SRC_IP' in ddos_df.columns else set()
+            tcp_sources = set(tcp_df['SRC_IP'].dropna().unique())
+            
+            # Find potential bots (appear in both C2 and attack traffic)
+            potential_bots = c2_ips.intersection(tcp_sources)
+            
+            if len(potential_bots) >= 2:
+                # Create correlation indicator
+                for c2_ip in c2_ips:
+                    bot_count = len(potential_bots)
+                    
+                    # Get attack types
+                    attack_types = ddos_df['TYPE'].unique().tolist() if 'TYPE' in ddos_df.columns else []
+                    attack_type = attack_types[0] if attack_types else 'Unknown'
+                    
+                    score = min(98, 90 + int(min(8, bot_count / 3)))
+                    
+                    rows.append({
+                        'INDICATOR': f'C2: {c2_ip} → Coordinated DDoS',
+                        'TYPE': 'C2-Coordinated DDoS Attack',
+                        'SCORE': score,
+                        'C2_IP': c2_ip,
+                        'BOT_COUNT': bot_count,
+                        'ATTACK_TYPE': attack_type,
+                        'TIME_DELTA': 'Correlated',
+                        'SRC_IP': c2_ip,
+                        'DST_IP': ''
+                    })
+                    break  # Only create one correlation entry
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','C2_IP','BOT_COUNT','ATTACK_TYPE','TIME_DELTA','SRC_IP','DST_IP'])
+
+
+def compute_ddos_heuristics(tcp_df, udp_df, icmp_df, http_df, dns_detail_df, c2_df):
+    """Compute all DDoS detection heuristics"""
+    parts = []
+    
+    # Volume-based attacks
+    parts.append(detect_syn_flood(tcp_df))
+    parts.append(detect_udp_flood(udp_df))
+    parts.append(detect_icmp_flood(icmp_df))
+    parts.append(detect_packet_rate_anomalies(tcp_df, udp_df, icmp_df))
+    
+    # Amplification attacks
+    parts.append(detect_dns_amplification(dns_detail_df))
+    
+    # Application-layer attacks
+    parts.append(detect_http_flood(http_df))
+    
+    # Distributed attacks
+    parts.append(detect_multi_source_attack(tcp_df, udp_df))
+    parts.append(detect_botnet_signatures(tcp_df, udp_df))
+    
+    # Combine all detections
+    df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP'])
+    
+    if not df.empty:
+        # Ensure SRC_IP and DST_IP columns exist
+        if 'SRC_IP' not in df.columns:
+            df['SRC_IP'] = ''
+        if 'DST_IP' not in df.columns:
+            df['DST_IP'] = ''
+        
+        # Fill NaN values
+        df['SRC_IP'] = df['SRC_IP'].fillna('')
+        df['DST_IP'] = df['DST_IP'].fillna('')
+        
+        # Sort by score
+        df = df.sort_values(['SCORE', 'COUNT'], ascending=[False, False], ignore_index=True)
+    
+    # Add C2-DDoS correlation
+    c2_ddos_corr = correlate_c2_to_ddos(c2_df, df, tcp_df)
+    if not c2_ddos_corr.empty:
+        df = pd.concat([c2_ddos_corr, df], ignore_index=True)
+    
+    return df
+
+# -----------------------
 # JS and HTML templates (embedded)
 # -----------------------
 # Note: These strings are intentionally raw-like content — they will be written to files by pipeline()
 JS_TEMPLATE = r"""
-// === Dashboard JS (Stability v20.1) ===
+// === Dashboard JS (Stability v20.3 - DDoS Detection) ===
 if (window.__DASHBOARD_ACTIVE__) { console.warn("Dashboard already active — skipping duplicate init."); }
 else { window.__DASHBOARD_ACTIVE__ = true; }
 
@@ -604,6 +1142,10 @@ const c2FullData    = %%C2FULL%%;    // complete heuristic table dataset
 const advData       = %%ADV%%;
 const beaconData    = %%BEACON%%;
 const dnstunnelData = %%DNSTUNNEL%%;
+
+// DDoS Detection Data
+const ddosData      = %%DDOS%%;      // all DDoS detections
+const ddosGraphData = %%DDOSGRAPH%%; // DDoS graph subset
 
 
 // ------------------------------------------------------------
@@ -815,6 +1357,10 @@ function updateDashboard(){
   renderTableRows(document.querySelector('#tbl_adv tbody'), (advData||[]).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT']);
   renderTableRows(document.querySelector('#tbl_beacon tbody'), (beaconData||[]).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT']);
   renderTableRows(document.querySelector('#tbl_dnstunnel tbody'), (dnstunnelData||[]).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT','NOTES']);
+  
+  // DDoS Detection table
+  const ddosSlice = (ddosData||[]).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  renderTableRows(document.querySelector('#tbl_ddos tbody'), ddosSlice, ['INDICATOR','TYPE','SCORE','COUNT']);
 
   // ------------------------
   // PIVOT
@@ -833,6 +1379,16 @@ function updateDashboard(){
   }
 
   renderC2Graph('c2graph', edgesForGraph);
+  
+  // ------------------------
+  // DDoS GRAPH
+  // ------------------------
+  let ddosEdgesForGraph = (ddosGraphData || []).slice();
+  if(ddosEdgesForGraph.length > 150){
+    console.warn("DDoS graph trimmed to 150 edges for readability.");
+    ddosEdgesForGraph = ddosEdgesForGraph.slice(0,150);
+  }
+  renderC2Graph('ddosgraph', ddosEdgesForGraph);
 
   // ------------------------
   // CHARTS
@@ -906,7 +1462,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 <html>
 <head>
 <meta charset='utf-8'/>
-<title>PCAP Dashboard (Stability v20.1)</title>
+<title>PCAP Dashboard (Stability v20.3 - DDoS Detection)</title>
 <link rel='stylesheet' href='https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css'>
 <link rel='stylesheet' href='https://cdn.datatables.net/buttons/2.4.1/css/buttons.dataTables.min.css'>
 <script src='https://code.jquery.com/jquery-3.7.1.min.js'></script>
@@ -921,12 +1477,12 @@ HTML_TEMPLATE = r"""<!doctype html>
 <style>
 :root{--card-h:220px}*{box-sizing:border-box}
 body{margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:#f5f7fa;color:#111;font-size:11px}
-.app{display:flex;min-height:100vh}.sidebar{width:260px;background:#0f1724;color:#fff;padding:18px;font-size:11px}.content{flex:1;padding:18px}.card-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;align-items:start}.card{background:#fff;padding:14px;border-radius:10px;box-shadow:0 6px 18px rgba(13,26,40,0.06);display:flex;flex-direction:column}.chart-box{width:100%;height:220px;min-height:220px;max-height:220px;flex:0 0 auto;position:relative;overflow:hidden}.chart-box canvas{width:100% !important;height:100% !important;display:block}.table-wrap{overflow:auto;max-height:220px;margin-top:8px}.display{width:100%;table-layout:fixed !important;white-space:nowrap}.display th,.display td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px 8px;font-size:11px}#heatmap_canvas{width:100%;height:360px;border:1px solid #e6e9ef;background:#fff;display:block}#c2graph{width:100%;height:320px;border:1px solid #e6e9ef;background:#fff}
+.app{display:flex;min-height:100vh}.sidebar{width:260px;background:#0f1724;color:#fff;padding:18px;font-size:11px}.content{flex:1;padding:18px}.card-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;align-items:start}.card{background:#fff;padding:14px;border-radius:10px;box-shadow:0 6px 18px rgba(13,26,40,0.06);display:flex;flex-direction:column}.chart-box{width:100%;height:220px;min-height:220px;max-height:220px;flex:0 0 auto;position:relative;overflow:hidden}.chart-box canvas{width:100% !important;height:100% !important;display:block}.table-wrap{overflow:auto;max-height:220px;margin-top:8px}.display{width:100%;table-layout:fixed !important;white-space:nowrap}.display th,.display td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px 8px;font-size:11px}#heatmap_canvas{width:100%;height:360px;border:1px solid #e6e9ef;background:#fff;display:block}#c2graph,#ddosgraph{width:100%;height:320px;border:1px solid #e6e9ef;background:#fff}
 body.dark { background: #0b1116 !important; color: #e6eef6 !important; }
 body.dark .sidebar { background:#071018 !important; color:#e6eef6 !important; }
 body.dark .card { background:#0e1620 !important; color:#e6eef6 !important; box-shadow: 0 6px 18px rgba(0,0,0,0.6); }
 body.dark .display th, body.dark .display td { color:#d6e6f6 !important; background: transparent !important; }
-body.dark #c2graph, body.dark #heatmap_canvas { background:#071018 !important; border-color:#21313d !important; }
+body.dark #c2graph, body.dark #ddosgraph, body.dark #heatmap_canvas { background:#071018 !important; border-color:#21313d !important; }
 </style>
 </head>
 <body>
@@ -937,7 +1493,7 @@ body.dark #c2graph, body.dark #heatmap_canvas { background:#071018 !important; b
     <div style='margin-top:12px'><button id='clear_filters' style='padding:8px;border-radius:6px;background:#10b981;color:#fff;border:none;cursor:pointer'>Clear Filters</button></div>
   </aside>
   <main class='content'>
-    <h1 style='margin:0 0 12px 0'>PCAP Analysis Dashboard (Stability v20.1)</h1>
+    <h1 style='margin:0 0 12px 0'>PCAP Analysis Dashboard (Stability v20.3 - DDoS Detection)</h1>
 
     <div style='margin-bottom:12px'>
       <label>Source IP: <input id='filter_src' type='text'></label>
@@ -950,12 +1506,17 @@ body.dark #c2graph, body.dark #heatmap_canvas { background:#071018 !important; b
     <div class='card-grid'>
       <div class='card'><h3>Timeline</h3><div class='chart-box'><canvas id='chart_timeline'></canvas></div></div>
       <div class='card'><h3>C2 Graph</h3><div id='c2graph'></div></div>
+      <div class='card'><h3>DDoS Attack Graph</h3><div id='ddosgraph'></div></div>
       <div class='card'><h3>DNS Top</h3><div class='chart-box'><canvas id='chart_dns'></canvas></div><div class='table-wrap'><table id='tbl_dns' class='display'><thead><tr><th>DOMAIN</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
       <div class='card'><h3>HTTP Top</h3><div class='chart-box'><canvas id='chart_http'></canvas></div><div class='table-wrap'><table id='tbl_http' class='display'><thead><tr><th>DOMAIN</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
       <div class='card'><h3>TLS SNI / JA3</h3><div class='chart-box'><canvas id='chart_tls'></canvas></div><div class='table-wrap'><table id='tbl_tls' class='display'><thead><tr><th>SNI</th><th>JA3</th><th>SRC_IP</th><th>DST_IP</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
       <div class='card'><h3>TCP Flags</h3><div class='chart-box'><canvas id='chart_tcp'></canvas></div><div class='table-wrap'><table id='tbl_tcp' class='display'><thead><tr><th>SRC_IP</th><th>DST_IP</th><th>FLAGS</th><th>COUNT</th><th>PERCENT</th></tr></thead><tbody></tbody></table></div></div>
     </div>
 
+    <div style='margin-top:18px' class='card'>
+      <h3>DDoS Attack Detection</h3>
+      <div class='table-wrap'><table id='tbl_ddos' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
+    </div>
 
     <div style='margin-top:18px' class='card'>
       <h3>Advanced Heuristics</h3>
@@ -994,48 +1555,43 @@ body.dark #c2graph, body.dark #heatmap_canvas { background:#071018 !important; b
 # -----------------------
 def pipeline(pcap=FILE_PCAP):
     try:
-        print("\n=== Stability v20.1: Starting pipeline ===\n")
+        print("\n=== Stability v20.3: Starting pipeline with DDoS Detection ===\n")
 
-        print("[1/11] Parsing PCAP...")
-        dns, tcp, http, tls = parse_streams(pcap)
+        print("[1/14] Parsing PCAP (enhanced for DDoS detection)...")
+        dns, tcp, http, tls, udp, icmp, dns_detail = parse_streams(pcap)
 
-        print("[2/11] Aggregating DNS...")
+        print("[2/14] Aggregating DNS...")
         dnsA = agg(dns, ['DOMAIN'])
 
-        print("[3/11] Aggregating HTTP...")
+        print("[3/14] Aggregating HTTP...")
         httpA = agg(http, ['DOMAIN'])
 
-        print("[4/11] Aggregating TLS (ensure columns exist)...")
+        print("[4/14] Aggregating TLS (ensure columns exist)...")
         tls_cols = ['SNI', 'JA3', 'SRC_IP', 'DST_IP']
         for col in tls_cols:
             if col not in tls.columns:
                 tls[col] = None
         tlsA = agg(tls, tls_cols)
 
-        print("[5/11] Aggregating TCP...")
+        print("[5/14] Aggregating TCP...")
         tcpA = agg(tcp, ['SRC_IP', 'DST_IP', 'FLAGS'])
 
-        print("[6/11] Building HTTP Timeline...")
+        print("[6/14] Building HTTP Timeline...")
         timeline = {}
         if os.path.exists(pcap) and PcapReader:
-            with PcapReader(pcap) as rdr:
-                for p in rdr:
-                    try:
-                        if getattr(p, 'haslayer', lambda x: False)(Raw):
-                            pl = bytes(p[Raw]).decode(errors='ignore')
-                            if re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', pl):
-                                ts = int(getattr(p, 'time', time.time()))
-                                key = time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))
-                                timeline[key] = timeline.get(key, 0) + 1
-                    except Exception:
-                        pass
+            # Use http dataframe if it already has timestamps
+            if not http.empty and 'TS' in http.columns:
+                for _, row in http.iterrows():
+                    ts = int(row['TS'])
+                    key = time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))
+                    timeline[key] = timeline.get(key, 0) + 1
         timeline_list = [{'label': k, 'count': v} for k, v in sorted(timeline.items())]
 
-        print("[7/11] Computing full C2 heuristic indicators...")
+        print("[7/14] Computing full C2 heuristic indicators...")
         c2_full = compute_c2_heuristics(dnsA, httpA, tlsA, tcpA)
 
         # Build graph subset (filtered) for readable graph
-        print("[8/11] Preparing compact C2 dataset for graph (filter + cap)...")
+        print("[8/14] Preparing compact C2 dataset for graph (filter + cap)...")
 
         # pick only "graph-worthy" types and high scores, but keep fallback to some rows if empty
         important_prefixes = [
@@ -1076,32 +1632,31 @@ def pipeline(pcap=FILE_PCAP):
         print(f"  - c2_full rows: {len(c2_full)}")
         print(f"  - c2_graph rows (graph): {len(c2_graph)}")
 
-        print("[9/11] Computing Advanced Heuristics...")
+        print("[9/14] Computing Advanced Heuristics...")
         adv = compute_advanced_heuristics(dnsA, httpA, tlsA, tcpA, timeline_list)
 
-        print("[10/11] Detecting Beaconing...")
-        if 'TS' not in tcp.columns:
-            ts_rows = []
-            if os.path.exists(pcap) and PcapReader:
-                with PcapReader(pcap) as rdr:
-                    for p in rdr:
-                        try:
-                            if getattr(p, 'haslayer', lambda x: False)(TCP) and getattr(p, 'haslayer', lambda x: False)(IP):
-                                if getattr(p, 'haslayer', lambda x: False)(Raw):
-                                    src = p[IP].src; dst = p[IP].dst
-                                    ts_rows.append({'SRC_IP': src, 'DST_IP': dst, 'TS': float(getattr(p, 'time', time.time()))})
-                        except Exception:
-                            pass
-            tcp_ts_df = pd.DataFrame(ts_rows) if ts_rows else tcp.copy()
-        else:
-            tcp_ts_df = tcp.copy()
-        beacon = detect_beaconing(tcp_ts_df)
+        print("[10/14] Detecting Beaconing...")
+        beacon = detect_beaconing(tcp)
 
-        print("[11/11] Detecting DNS Tunneling...")
+        print("[11/14] Detecting DNS Tunneling...")
         dnstunnel = detect_dnstunneling(dns)
+        
+        print("[12/14] Computing DDoS Attack Heuristics...")
+        ddos = compute_ddos_heuristics(tcp, udp, icmp, http, dns_detail, c2_full)
+        print(f"  - DDoS detections: {len(ddos)}")
+        
+        print("[13/14] Preparing DDoS graph subset...")
+        # Create graph-worthy DDoS subset (similar to C2 graph logic)
+        if not ddos.empty:
+            ddos_graph = ddos[ddos['SCORE'] >= GRAPH_MIN_SCORE].copy()
+            if len(ddos_graph) > MAX_GRAPH_EDGES:
+                ddos_graph = ddos_graph.head(MAX_GRAPH_EDGES)
+        else:
+            ddos_graph = pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP'])
+        print(f"  - ddos_graph rows: {len(ddos_graph)}")
 
         # Build JS and HTML files
-        print("[->] Writing dashboard.js and dashboard.html ...")
+        print("[14/14] Writing dashboard.js and dashboard.html ...")
         js = (
             JS_TEMPLATE
             .replace('%%DNS%%', safe_js_json(dnsA.to_dict(orient='records')))
@@ -1114,6 +1669,8 @@ def pipeline(pcap=FILE_PCAP):
             .replace('%%ADV%%', safe_js_json(adv.to_dict(orient='records')))
             .replace('%%BEACON%%', safe_js_json(beacon.to_dict(orient='records')))
             .replace('%%DNSTUNNEL%%', safe_js_json(dnstunnel.to_dict(orient='records')))
+            .replace('%%DDOS%%', safe_js_json(ddos.to_dict(orient='records')))
+            .replace('%%DDOSGRAPH%%', safe_js_json(ddos_graph.to_dict(orient='records')))
         )
 
         with open('dashboard.js', 'w', encoding='utf-8') as jf:
@@ -1125,7 +1682,7 @@ def pipeline(pcap=FILE_PCAP):
             hf.write(html_output)
         print("→ dashboard.html written.")
 
-        print("\n=== DONE: Stability v20.1 dashboard generated ===\n")
+        print("\n=== DONE: Stability v20.3 dashboard with DDoS detection generated ===\n")
 
     except Exception:
         print("\n\n=== PIPELINE CRASH ===")
