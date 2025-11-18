@@ -1947,7 +1947,8 @@ canvas{
   position: relative;
   margin-top: 8px;
   min-height: 750px;  /* ✅ Ensure minimum height */
-  flex-shrink: 0;  /* ✅ Prevent flex shrinking */
+  max-height: 750px;  /* ✅ Prevent expansion beyond intended size */
+  flex: 0 0 750px;  /* ✅ Explicit flex basis for consistent sizing */
 }
 
 #c2graph::after, #ddosgraph::after {
@@ -1996,6 +1997,9 @@ body.dark .card-full h3 {
 @media (min-width: 1400px) {
   #c2graph, #ddosgraph {
     height: 850px;  /* ✅ Increased from 800px to match larger card workspace */
+    min-height: 850px;
+    max-height: 850px;
+    flex: 0 0 850px;  /* ✅ Explicit flex basis for large screens */
   }
   
   .card-full {
