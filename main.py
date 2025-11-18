@@ -16,11 +16,11 @@ from tqdm import tqdm
 
 # scapy import with lazy fallback if running where scapy not available for dry-run
 try:
-    from scapy.all import PcapReader, TCP, IP, Raw, DNS, DNSRR, UDP, ICMP
+    from scapy.all import PcapReader, TCP, IP, IPv6, Raw, DNS, DNSRR, UDP, ICMP, ICMPv6ND_NS, ICMPv6ND_NA
 except Exception:
     # allow static testing on systems without scapy; Pcap parsing will fail but code remains testable
     PcapReader = None
-    TCP = IP = Raw = DNS = DNSRR = UDP = ICMP = object
+    TCP = IP = IPv6 = Raw = DNS = DNSRR = UDP = ICMP = ICMPv6ND_NS = ICMPv6ND_NA = object
 
 # -----------------------
 # CONFIG
@@ -116,10 +116,50 @@ def is_trusted_domain(domain):
     d = domain.lower().strip().rstrip('.')
     return any(d == t or d.endswith('.' + t) for t in TRUSTED_DOMAINS)
 
-def is_private_ip(ip):
-    """Check if IP is private (RFC1918) or invalid"""
-    if not ip or ':' in ip:  # Skip IPv6 and empty
+def is_private_ipv6(ip):
+    """Check if IPv6 address is private/reserved"""
+    try:
+        # Handle compressed IPv6 format
+        ip = ip.strip().lower()
+        
+        # Loopback (::1)
+        if ip == '::1':
+            return True
+        
+        # Link-local (fe80::/10)
+        if ip.startswith('fe80:'):
+            return True
+        
+        # Unique local (fc00::/7)
+        if ip.startswith('fc') or ip.startswith('fd'):
+            return True
+        
+        # IPv4-mapped IPv6 (::ffff:0:0/96)
+        if '::ffff:' in ip:
+            return True
+        
+        # Documentation (2001:db8::/32)
+        if ip.startswith('2001:db8:'):
+            return True
+        
+        # Unspecified (::)
+        if ip == '::':
+            return True
+        
+        return False
+    except:
         return True
+
+def is_private_ip(ip):
+    """Check if IP is private/reserved (supports IPv4 and IPv6)"""
+    if not ip:
+        return True
+    
+    # Detect IPv6 (contains colons)
+    if ':' in ip:
+        return is_private_ipv6(ip)
+    
+    # IPv4 logic
     parts = ip.split('.')
     if len(parts) != 4:
         return True
@@ -146,6 +186,15 @@ def is_private_ip(ip):
         return False
     except:
         return True
+
+def get_ip_layer(pkt):
+    """Extract IP layer (v4 or v6) from packet"""
+    if hasattr(pkt, 'haslayer'):
+        if pkt.haslayer(IP):
+            return pkt[IP], 'v4'
+        elif pkt.haslayer(IPv6):
+            return pkt[IPv6], 'v6'
+    return None, None
 
 def safe_js_json(obj):
     # ensure JSON is safe to embed in <script>
@@ -314,10 +363,11 @@ def parse_streams(pcap_path):
                             query_size = 0
                             response_size = 0
                             
-                            # Get packet size info for amplification detection
-                            if getattr(p, 'haslayer', lambda x: False)(IP):
-                                src_ip = p[IP].src
-                                dst_ip = p[IP].dst
+                            # Get packet size info for amplification detection - support IPv4 and IPv6
+                            ip_layer, ip_version = get_ip_layer(p)
+                            if ip_layer:
+                                src_ip = ip_layer.src
+                                dst_ip = ip_layer.dst
                                 query_size = pkt_size
                                 
                                 # Check if this is a response (has answer)
@@ -344,121 +394,143 @@ def parse_streams(pcap_path):
                     except Exception:
                         pass
 
-                # ✅ TCP + IP flows with PAYLOAD STORAGE (ENHANCED)
-                if getattr(p, 'haslayer', lambda x: False)(TCP) and getattr(p, 'haslayer', lambda x: False)(IP):
-                    src = p[IP].src
-                    dst = p[IP].dst
-                    src_port = p[TCP].sport
-                    dst_port = p[TCP].dport
-                    flags = tcp_flags_str_local(p)
-                    
-                    # ✅ NEW: Extract raw payload from ALL TCP packets
-                    raw_payload = ''
-                    if getattr(p, 'haslayer', lambda x: False)(Raw):
-                        payload_bytes = bytes(p[Raw])
-                        raw_payload = payload_bytes.decode(errors='ignore')
-                    
-                    tcp_rows.append({
-                        'SRC_IP':src,
-                        'DST_IP':dst,
-                        'FLAGS':flags,
-                        'COUNT':1,
-                        'TS':ts,
-                        'SIZE':pkt_size,
-                        'SRC_PORT':src_port,
-                        'DST_PORT':dst_port,
-                        'PAYLOAD':raw_payload[:5000]  # ✅ NEW: Store payload
-                    })
-
-                    # HTTP + TLS payload analysis
-                    if getattr(p, 'haslayer', lambda x: False)(Raw):
-                        payload = bytes(p[Raw])
-                        txt = payload.decode(errors='ignore')
-
-                        # ✅ Detect HTTP REQUESTS (enhanced with payload storage)
-                        http_match = re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', txt)
-                        if http_match:
-                            method = http_match.group(1)
-                            lines = txt.splitlines()
-                            host = None
-                            for ln in lines:
-                                m = _http_host_re.search(ln)
-                                if m:
-                                    host = m.group(1).strip(); break
-                            if not host:
-                                for ln in lines:
-                                    m2 = re.search(r'(GET|POST|HEAD|PUT|DELETE)\s+https?://([^/]+)', ln)
-                                    if m2:
-                                        host = m2.group(2).strip(); break
-                            request_line = next((ln for ln in lines if re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', ln)), lines[0] if lines else '')
-                            if host and not is_trusted_domain(host):
-                                http_rows.append({
-                                    'DOMAIN': host,
-                                    'REQUEST': request_line,
-                                    'COUNT': 1,
-                                    'METHOD': method,
-                                    'TS': ts,
-                                    'SRC_IP': src,
-                                    'DST_IP': dst,
-                                    'PAYLOAD': txt[:5000]  # ✅ NEW: Store HTTP request payload
-                                })
+                # ✅ TCP + IP flows with PAYLOAD STORAGE (ENHANCED) - Support IPv4 and IPv6
+                if getattr(p, 'haslayer', lambda x: False)(TCP):
+                    ip_layer, ip_version = get_ip_layer(p)
+                    if ip_layer:
+                        src = ip_layer.src
+                        dst = ip_layer.dst
+                        src_port = p[TCP].sport
+                        dst_port = p[TCP].dport
+                        flags = tcp_flags_str_local(p)
                         
-                        # ✅ NEW: Detect HTTP RESPONSES
-                        http_response_match = re.search(r'^HTTP/\d\.\d\s+(\d{3})', txt, re.MULTILINE)
-                        if http_response_match:
-                            status_code = http_response_match.group(1)
-                            domain = src  # Server IP sending response
-                            
-                            if not is_trusted_domain(domain):
-                                http_rows.append({
-                                    'DOMAIN': domain,
-                                    'REQUEST': f'HTTP/{status_code} Response',
-                                    'COUNT': 1,
-                                    'METHOD': 'RESPONSE',
-                                    'TS': ts,
-                                    'SRC_IP': src,
-                                    'DST_IP': dst,
-                                    'PAYLOAD': txt[:5000]  # ✅ NEW: Store HTTP response payload
-                                })
+                        # ✅ NEW: Extract raw payload from ALL TCP packets
+                        raw_payload = ''
+                        if getattr(p, 'haslayer', lambda x: False)(Raw):
+                            payload_bytes = bytes(p[Raw])
+                            raw_payload = payload_bytes.decode(errors='ignore')
+                        
+                        tcp_rows.append({
+                            'SRC_IP':src,
+                            'DST_IP':dst,
+                            'FLAGS':flags,
+                            'COUNT':1,
+                            'TS':ts,
+                            'SIZE':pkt_size,
+                            'SRC_PORT':src_port,
+                            'DST_PORT':dst_port,
+                            'PAYLOAD':raw_payload[:5000]  # ✅ NEW: Store payload
+                        })
 
-                        # TLS ClientHello: SNI + JA3
-                        try:
-                            sni = extract_sni_from_client_hello(payload)
-                            ja3 = extract_ja3_from_client_hello(payload)
-                            if sni or ja3:
-                                sni_clean = sni.strip().rstrip('.') if sni else ''
-                                if not (sni_clean and is_trusted_domain(sni_clean)):
-                                    tls_rows.append({'SNI': sni_clean, 'JA3': ja3, 'SRC_IP': src, 'DST_IP': dst, 'COUNT': 1})
-                        except Exception:
-                            pass
+                        # HTTP + TLS payload analysis
+                        if getattr(p, 'haslayer', lambda x: False)(Raw):
+                            payload = bytes(p[Raw])
+                            txt = payload.decode(errors='ignore')
+
+                            # ✅ Detect HTTP REQUESTS (enhanced with payload storage)
+                            http_match = re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', txt)
+                            if http_match:
+                                method = http_match.group(1)
+                                lines = txt.splitlines()
+                                host = None
+                                for ln in lines:
+                                    m = _http_host_re.search(ln)
+                                    if m:
+                                        host = m.group(1).strip(); break
+                                if not host:
+                                    for ln in lines:
+                                        m2 = re.search(r'(GET|POST|HEAD|PUT|DELETE)\s+https?://([^/]+)', ln)
+                                        if m2:
+                                            host = m2.group(2).strip(); break
+                                request_line = next((ln for ln in lines if re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', ln)), lines[0] if lines else '')
+                                if host and not is_trusted_domain(host):
+                                    http_rows.append({
+                                        'DOMAIN': host,
+                                        'REQUEST': request_line,
+                                        'COUNT': 1,
+                                        'METHOD': method,
+                                        'TS': ts,
+                                        'SRC_IP': src,
+                                        'DST_IP': dst,
+                                        'PAYLOAD': txt[:5000]  # ✅ NEW: Store HTTP request payload
+                                    })
+                            
+                            # ✅ NEW: Detect HTTP RESPONSES
+                            http_response_match = re.search(r'^HTTP/\d\.\d\s+(\d{3})', txt, re.MULTILINE)
+                            if http_response_match:
+                                status_code = http_response_match.group(1)
+                                domain = src  # Server IP sending response
+                                
+                                if not is_trusted_domain(domain):
+                                    http_rows.append({
+                                        'DOMAIN': domain,
+                                        'REQUEST': f'HTTP/{status_code} Response',
+                                        'COUNT': 1,
+                                        'METHOD': 'RESPONSE',
+                                        'TS': ts,
+                                        'SRC_IP': src,
+                                        'DST_IP': dst,
+                                        'PAYLOAD': txt[:5000]  # ✅ NEW: Store HTTP response payload
+                                    })
+
+                            # TLS ClientHello: SNI + JA3
+                            try:
+                                sni = extract_sni_from_client_hello(payload)
+                                ja3 = extract_ja3_from_client_hello(payload)
+                                if sni or ja3:
+                                    sni_clean = sni.strip().rstrip('.') if sni else ''
+                                    if not (sni_clean and is_trusted_domain(sni_clean)):
+                                        tls_rows.append({'SNI': sni_clean, 'JA3': ja3, 'SRC_IP': src, 'DST_IP': dst, 'COUNT': 1})
+                            except Exception:
+                                pass
                 
-                # UDP traffic for flood detection
-                if getattr(p, 'haslayer', lambda x: False)(UDP) and getattr(p, 'haslayer', lambda x: False)(IP):
-                    src = p[IP].src
-                    dst = p[IP].dst
-                    src_port = p[UDP].sport
-                    dst_port = p[UDP].dport
-                    udp_rows.append({
-                        'SRC_IP': src,
-                        'DST_IP': dst,
-                        'SRC_PORT': src_port,
-                        'DST_PORT': dst_port,
-                        'TS': ts,
-                        'SIZE': pkt_size
-                    })
+                # UDP traffic for flood detection - Support IPv4 and IPv6
+                if getattr(p, 'haslayer', lambda x: False)(UDP):
+                    ip_layer, ip_version = get_ip_layer(p)
+                    if ip_layer:
+                        src = ip_layer.src
+                        dst = ip_layer.dst
+                        src_port = p[UDP].sport
+                        dst_port = p[UDP].dport
+                        udp_rows.append({
+                            'SRC_IP': src,
+                            'DST_IP': dst,
+                            'SRC_PORT': src_port,
+                            'DST_PORT': dst_port,
+                            'TS': ts,
+                            'SIZE': pkt_size
+                        })
                 
-                # ICMP traffic for flood detection
-                if getattr(p, 'haslayer', lambda x: False)(ICMP) and getattr(p, 'haslayer', lambda x: False)(IP):
-                    src = p[IP].src
-                    dst = p[IP].dst
-                    icmp_type = p[ICMP].type if hasattr(p[ICMP], 'type') else 0
-                    icmp_rows.append({
-                        'SRC_IP': src,
-                        'DST_IP': dst,
-                        'ICMP_TYPE': icmp_type,
-                        'TS': ts,
-                        'SIZE': pkt_size
-                    })
+                # ICMP traffic for flood detection - Support IPv4 and ICMPv6
+                if getattr(p, 'haslayer', lambda x: False)(ICMP):
+                    ip_layer, ip_version = get_ip_layer(p)
+                    if ip_layer:
+                        src = ip_layer.src
+                        dst = ip_layer.dst
+                        icmp_type = p[ICMP].type if hasattr(p[ICMP], 'type') else 0
+                        icmp_rows.append({
+                            'SRC_IP': src,
+                            'DST_IP': dst,
+                            'ICMP_TYPE': icmp_type,
+                            'TS': ts,
+                            'SIZE': pkt_size
+                        })
+                
+                # ICMPv6 traffic for flood detection
+                if getattr(p, 'haslayer', lambda x: False)(ICMPv6ND_NS) or getattr(p, 'haslayer', lambda x: False)(ICMPv6ND_NA):
+                    ip_layer, ip_version = get_ip_layer(p)
+                    if ip_layer:
+                        src = ip_layer.src
+                        dst = ip_layer.dst
+                        # ICMPv6 Neighbor Solicitation (135) or Neighbor Advertisement (136)
+                        icmp_type = 135 if getattr(p, 'haslayer', lambda x: False)(ICMPv6ND_NS) else 136
+                        icmp_rows.append({
+                            'SRC_IP': src,
+                            'DST_IP': dst,
+                            'ICMP_TYPE': icmp_type,
+                            'TS': ts,
+                            'SIZE': pkt_size
+                        })
 
             except Exception:
                 continue
