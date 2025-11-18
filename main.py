@@ -1515,6 +1515,13 @@ function renderC2Graph(containerId, data){
   };
 
   el.innerHTML = '';
+  
+  // ✅ Ensure container has explicit dimensions before Cytoscape initializes
+  // This is critical - Cytoscape needs the container to have a height when it initializes
+  if(el.offsetHeight < 700) {
+    console.warn(`Container ${containerId} height is ${el.offsetHeight}px, forcing to 750px`);
+    el.style.height = '750px';
+  }
 
   try{
     const cy = cytoscape({
@@ -1630,8 +1637,12 @@ function renderC2Graph(containerId, data){
       ddosGraphInstance = cy;
     }
     
+    // ✅ Force resize to ensure Cytoscape uses full container dimensions
+    cy.resize();
+    
     // ✅ Re-fit after layout animation completes
     setTimeout(() => {
+      cy.resize();  // Ensure Cytoscape has correct dimensions
       cy.fit(80);  // Increased padding from 60
     }, 600);
     
