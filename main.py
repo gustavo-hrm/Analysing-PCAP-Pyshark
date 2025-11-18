@@ -36,6 +36,14 @@ TRUSTED_DOMAINS = {
 MAX_GRAPH_EDGES = 50   # cap to avoid hairballs
 GRAPH_MIN_SCORE = 25    # minimal SCORE for graph-worthy indicators
 
+# Enhanced C2 Detection Thresholds
+BEACONING_CV_THRESHOLD = 0.50  # Coefficient of variation tolerance (increased from 0.35 to catch C2s with jitter)
+BEACONING_MIN_COUNT = 12       # Minimum connections for beaconing detection
+PAYLOAD_ENTROPY_THRESHOLD = 7.5  # Entropy threshold for encrypted payload detection
+DNS_TUNNEL_MIN_SCORE = 40      # Minimum score for DNS tunneling detection
+STANDARD_TLS_PORTS = {443, 8443, 9443}  # Standard TLS ports
+STANDARD_HTTP_PORTS = {80, 8080, 8000, 8888}  # Standard HTTP ports
+
 # -----------------------
 # Utilities
 # -----------------------
@@ -44,6 +52,43 @@ def shannon_entropy(s):
     s = str(s)
     probs = [s.count(c) / len(s) for c in set(s)]
     return -sum(p * math.log2(p) for p in probs)
+
+def payload_entropy(data):
+    """Calculate entropy of payload data to detect encrypted/encoded content."""
+    if not data or len(data) == 0: return 0.0
+    byte_counts = [0] * 256
+    for byte in data:
+        byte_counts[byte] += 1
+    total = len(data)
+    entropy = 0.0
+    for count in byte_counts:
+        if count > 0:
+            prob = count / total
+            entropy -= prob * math.log2(prob)
+    return entropy
+
+def chi_square_test(data):
+    """Perform chi-square test to detect randomness in data (encrypted traffic indicator)."""
+    if not data or len(data) < 100: return 0.0
+    byte_counts = [0] * 256
+    for byte in data:
+        byte_counts[byte] += 1
+    expected = len(data) / 256.0
+    chi_square = sum((count - expected) ** 2 / expected for count in byte_counts if expected > 0)
+    return chi_square
+
+def is_base64_encoded(s):
+    """Detect if a string is likely base64 encoded."""
+    if not s or len(s) < 8: return False
+    # Base64 uses A-Z, a-z, 0-9, +, /, = characters
+    base64_pattern = re.compile(r'^[A-Za-z0-9+/]+={0,2}$')
+    return bool(base64_pattern.match(s))
+
+def is_hex_encoded(s):
+    """Detect if a string is hex encoded."""
+    if not s or len(s) < 8: return False
+    hex_pattern = re.compile(r'^[0-9a-fA-F]+$')
+    return bool(hex_pattern.match(s)) and len(s) % 2 == 0
 
 def is_trusted_domain(domain):
     if not domain: return False
@@ -146,6 +191,87 @@ def extract_sni_from_client_hello(data: bytes):
     except Exception:
         return None
 
+def extract_ja3s_from_server_hello(data: bytes):
+    """Extract JA3S (server-side TLS fingerprint) from ServerHello."""
+    try:
+        # Check for TLS handshake (0x16) and ServerHello (0x02)
+        if not data or len(data) < 6 or data[0] != 0x16:
+            return None
+        # Check if it's a ServerHello (message type 0x02)
+        if len(data) < 10 or data[5] != 0x02:
+            return None
+        
+        ptr = 5 + 4  # Skip record header + handshake header start
+        if ptr + 2 > len(data): return None
+        
+        # Skip TLS version (2 bytes)
+        ptr += 2
+        # Skip random (32 bytes)
+        if ptr + 32 > len(data): return None
+        ptr += 32
+        
+        # Skip session ID
+        if ptr + 1 > len(data): return None
+        sid_len = data[ptr]; ptr += 1 + sid_len
+        
+        # Get cipher suite (2 bytes)
+        if ptr + 2 > len(data): return None
+        cipher_suite = int.from_bytes(data[ptr:ptr+2], 'big')
+        ptr += 2
+        
+        # Skip compression method (1 byte)
+        if ptr + 1 > len(data): return None
+        ptr += 1
+        
+        # Parse extensions
+        if ptr + 2 > len(data): return None
+        ext_total = int.from_bytes(data[ptr:ptr+2], 'big')
+        ptr += 2
+        end = min(ptr + ext_total, len(data))
+        
+        exts = []
+        while ptr + 4 <= end:
+            ext_type = int.from_bytes(data[ptr:ptr+2], 'big')
+            ext_len = int.from_bytes(data[ptr+2:ptr+4], 'big')
+            ptr += 4
+            if ptr + ext_len > end: break
+            exts.append(str(ext_type))
+            ptr += ext_len
+        
+        # Build JA3S: TLS_version,cipher_suite,extensions
+        ja3s_str = f"{cipher_suite},{'-'.join(exts)}"
+        return hashlib.md5(ja3s_str.encode()).hexdigest()
+    except Exception:
+        return None
+
+def extract_tls_certificate_info(data: bytes):
+    """Extract basic certificate information from TLS Certificate message."""
+    try:
+        # Check for TLS handshake (0x16) and Certificate message (0x0b)
+        if not data or len(data) < 10 or data[0] != 0x16:
+            return None
+        if data[5] != 0x0b:  # Certificate message type
+            return None
+        
+        # Basic certificate info extraction
+        # This is simplified - full X.509 parsing would be complex
+        cert_info = {
+            'self_signed': False,
+            'recently_issued': False,
+            'suspicious_cn': False
+        }
+        
+        # Look for common self-signed indicators in the data
+        cert_data = data[9:min(len(data), 509)]  # Sample first 500 bytes
+        
+        # Simple heuristic: self-signed often have same issuer/subject
+        if b'localhost' in cert_data.lower() or b'untrusted' in cert_data.lower():
+            cert_info['self_signed'] = True
+            
+        return cert_info
+    except Exception:
+        return None
+
 # -----------------------
 # TCP flags helper
 # -----------------------
@@ -178,17 +304,17 @@ def parse_streams(pcap_path):
         # scapy not available: return empty frames with expected columns
         return (
             pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT']),
-            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT']),
-            pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT'])
+            pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','FLAGS','COUNT','PAYLOAD_SIZE','PAYLOAD_ENTROPY']),
+            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','USER_AGENT','REFERER','CONTENT_TYPE']),
+            pd.DataFrame(columns=['SNI','JA3','JA3S','SRC_IP','DST_IP','SRC_PORT','DST_PORT','COUNT','CERT_SELF_SIGNED'])
         )
 
     if not os.path.exists(pcap_path):
         return (
             pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT']),
-            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT']),
-            pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT'])
+            pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','FLAGS','COUNT','PAYLOAD_SIZE','PAYLOAD_ENTROPY']),
+            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','USER_AGENT','REFERER','CONTENT_TYPE']),
+            pd.DataFrame(columns=['SNI','JA3','JA3S','SRC_IP','DST_IP','SRC_PORT','DST_PORT','COUNT','CERT_SELF_SIGNED'])
         )
 
     with PcapReader(pcap_path) as rdr:
@@ -217,8 +343,28 @@ def parse_streams(pcap_path):
                 if getattr(p, 'haslayer', lambda x: False)(TCP) and getattr(p, 'haslayer', lambda x: False)(IP):
                     src = p[IP].src
                     dst = p[IP].dst
+                    src_port = p[TCP].sport
+                    dst_port = p[TCP].dport
                     flags = tcp_flags_str_local(p)
-                    tcp_rows.append({'SRC_IP':src,'DST_IP':dst,'FLAGS':flags,'COUNT':1})
+                    
+                    payload_size = 0
+                    payload_ent = 0.0
+                    
+                    if getattr(p, 'haslayer', lambda x: False)(Raw):
+                        payload = bytes(p[Raw])
+                        payload_size = len(payload)
+                        payload_ent = payload_entropy(payload)
+                    
+                    tcp_rows.append({
+                        'SRC_IP': src, 
+                        'DST_IP': dst, 
+                        'SRC_PORT': src_port, 
+                        'DST_PORT': dst_port, 
+                        'FLAGS': flags, 
+                        'COUNT': 1,
+                        'PAYLOAD_SIZE': payload_size,
+                        'PAYLOAD_ENTROPY': payload_ent
+                    })
 
                     # payload analysis
                     if getattr(p, 'haslayer', lambda x: False)(Raw):
@@ -230,10 +376,21 @@ def parse_streams(pcap_path):
                             if re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', txt):
                                 lines = txt.splitlines()
                                 host = None
+                                user_agent = None
+                                referer = None
+                                content_type = None
+                                
                                 for ln in lines:
                                     m = _http_host_re.search(ln)
                                     if m:
-                                        host = m.group(1).strip(); break
+                                        host = m.group(1).strip()
+                                    if ln.lower().startswith('user-agent:'):
+                                        user_agent = ln.split(':', 1)[1].strip()
+                                    if ln.lower().startswith('referer:'):
+                                        referer = ln.split(':', 1)[1].strip()
+                                    if ln.lower().startswith('content-type:'):
+                                        content_type = ln.split(':', 1)[1].strip()
+                                        
                                 if not host:
                                     for ln in lines:
                                         m2 = re.search(r'(GET|POST|HEAD|PUT|DELETE)\s+https?://([^/]+)', ln)
@@ -241,7 +398,14 @@ def parse_streams(pcap_path):
                                             host = m2.group(2).strip(); break
                                 request_line = next((ln for ln in lines if re.search(r'\b(GET|POST|HEAD|PUT|DELETE)\s+', ln)), lines[0] if lines else '')
                                 if host and not is_trusted_domain(host):
-                                    http_rows.append({'DOMAIN': host, 'REQUEST': request_line, 'COUNT': 1})
+                                    http_rows.append({
+                                        'DOMAIN': host, 
+                                        'REQUEST': request_line, 
+                                        'COUNT': 1,
+                                        'USER_AGENT': user_agent,
+                                        'REFERER': referer,
+                                        'CONTENT_TYPE': content_type
+                                    })
                         except Exception:
                             pass
 
@@ -249,10 +413,31 @@ def parse_streams(pcap_path):
                         try:
                             sni = extract_sni_from_client_hello(payload)
                             ja3 = extract_ja3_from_client_hello(payload)
-                            if sni or ja3:
+                            ja3s = None
+                            cert_self_signed = False
+                            
+                            # Try to extract JA3S from ServerHello
+                            ja3s = extract_ja3s_from_server_hello(payload)
+                            
+                            # Try to extract certificate info
+                            cert_info = extract_tls_certificate_info(payload)
+                            if cert_info:
+                                cert_self_signed = cert_info.get('self_signed', False)
+                            
+                            if sni or ja3 or ja3s:
                                 sni_clean = sni.strip().rstrip('.') if sni else ''
                                 if not (sni_clean and is_trusted_domain(sni_clean)):
-                                    tls_rows.append({'SNI': sni_clean, 'JA3': ja3, 'SRC_IP': src, 'DST_IP': dst, 'COUNT': 1})
+                                    tls_rows.append({
+                                        'SNI': sni_clean, 
+                                        'JA3': ja3, 
+                                        'JA3S': ja3s,
+                                        'SRC_IP': src, 
+                                        'DST_IP': dst,
+                                        'SRC_PORT': src_port,
+                                        'DST_PORT': dst_port,
+                                        'COUNT': 1,
+                                        'CERT_SELF_SIGNED': cert_self_signed
+                                    })
                         except Exception:
                             pass
 
@@ -260,9 +445,9 @@ def parse_streams(pcap_path):
                 continue
 
     dns_df = pd.DataFrame(dns_rows) if dns_rows else pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY'])
-    tcp_df = pd.DataFrame(tcp_rows) if tcp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT'])
-    http_df = pd.DataFrame(http_rows) if http_rows else pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT'])
-    tls_df = pd.DataFrame(tls_rows) if tls_rows else pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT'])
+    tcp_df = pd.DataFrame(tcp_rows) if tcp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','FLAGS','COUNT','PAYLOAD_SIZE','PAYLOAD_ENTROPY'])
+    http_df = pd.DataFrame(http_rows) if http_rows else pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','USER_AGENT','REFERER','CONTENT_TYPE'])
+    tls_df = pd.DataFrame(tls_rows) if tls_rows else pd.DataFrame(columns=['SNI','JA3','JA3S','SRC_IP','DST_IP','SRC_PORT','DST_PORT','COUNT','CERT_SELF_SIGNED'])
     return dns_df, tcp_df, http_df, tls_df
 
 # -----------------------
@@ -282,12 +467,23 @@ def agg(df, keys):
 # C2 heuristics (JA3-based + basic checks)
 # -----------------------
 MALICIOUS_JA3 = {
+    # Existing signatures
     "72a589da586844d7f0818ce684948eea": "Cobalt Strike",
     "3ca48e8aa725c3091f31146e55f883a1": "Emotet",
     "7d56f4c1d5b56a54a27f35e8afc6d2ba": "TrickBot",
     "3e1f1f1f4ec4cc1d83bb7eaf8cf68e39": "Sliver",
     "5e2c33d3cd42a4e9f4a0f4d344f1e2d0": "AsyncRAT",
     "6734f37431670b3ab4292b8f60f29984": "Meterpreter",
+    # Enhanced C2 framework signatures
+    "51c64c77e60f3980eea90869b68c58a8": "Metasploit",
+    "e7d705a3286e19ea42f587b344ee6865": "Poshc2",
+    "b20f698f2e1d801c8a6a7e3c85e1e3f8": "Empire",
+    "fc54e0d16d9764783542f0146a98b300": "Mythic",
+    "ada70206e40642a3e4461f35503241d5": "Covenant",
+    # Additional Cobalt Strike variants
+    "a0e9f5d64349fb13191bc781f81f42e1": "Cobalt Strike (variant 1)",
+    "b742b407517bac9536a77a7b0fee28e9": "Cobalt Strike (variant 2)",
+    "8fb0be2d2f5f6c3d5e8c5c8e0f5e6c3d": "Cobalt Strike (variant 3)",
 }
 
 def compute_c2_heuristics(dnsA, httpA, tlsA, tcpA):
@@ -311,13 +507,17 @@ def compute_c2_heuristics(dnsA, httpA, tlsA, tcpA):
                     'GRAPH_SKIP': True  # Flag to skip in graph
                 })
 
-    # TLS JA3 / SNI checks - THESE HAVE IP DATA
+    # TLS JA3 / JA3S / SNI checks - THESE HAVE IP DATA
     if not tlsA.empty:
         for _, r in tlsA.iterrows():
             sni = r.get('SNI','') or ''
             ja3 = r.get('JA3', None)
+            ja3s = r.get('JA3S', None)
             src_ip = r.get('SRC_IP', '')
             dst_ip = r.get('DST_IP', '')
+            src_port = r.get('SRC_PORT', 0)
+            dst_port = r.get('DST_PORT', 0)
+            cert_self_signed = r.get('CERT_SELF_SIGNED', False)
             
             if high_entropy(sni):
                 rows.append({
@@ -333,6 +533,125 @@ def compute_c2_heuristics(dnsA, httpA, tlsA, tcpA):
                     'INDICATOR': sni or src_ip, 
                     'TYPE': f"JA3 Match: {MALICIOUS_JA3[ja3]}", 
                     'SCORE': 95, 
+                    'COUNT': int(r.get('COUNT',0)),
+                    'SRC_IP': src_ip,
+                    'DST_IP': dst_ip
+                })
+            
+            # JA3S detection for unusual server stacks
+            if ja3s:
+                rows.append({
+                    'INDICATOR': sni or dst_ip,
+                    'TYPE': 'Custom TLS Server Stack (JA3S)',
+                    'SCORE': 55,
+                    'COUNT': int(r.get('COUNT',0)),
+                    'SRC_IP': src_ip,
+                    'DST_IP': dst_ip
+                })
+            
+            # Self-signed certificate detection
+            if cert_self_signed:
+                rows.append({
+                    'INDICATOR': sni or dst_ip,
+                    'TYPE': 'Self-Signed TLS Certificate',
+                    'SCORE': 70,
+                    'COUNT': int(r.get('COUNT',0)),
+                    'SRC_IP': src_ip,
+                    'DST_IP': dst_ip
+                })
+            
+            # Protocol anomaly: TLS on non-standard port
+            if dst_port and dst_port not in STANDARD_TLS_PORTS:
+                rows.append({
+                    'INDICATOR': f"{dst_ip}:{dst_port}",
+                    'TYPE': f'TLS on Non-Standard Port ({dst_port})',
+                    'SCORE': 65,
+                    'COUNT': int(r.get('COUNT',0)),
+                    'SRC_IP': src_ip,
+                    'DST_IP': dst_ip
+                })
+
+    # Enhanced HTTP C2 detection
+    if not httpA.empty:
+        for _, r in httpA.iterrows():
+            dom = (r.get('DOMAIN','') or '').lower()
+            request = (r.get('REQUEST','') or '').lower()
+            user_agent = r.get('USER_AGENT', '')
+            referer = r.get('REFERER', '')
+            content_type = r.get('CONTENT_TYPE', '')
+            
+            # Suspicious patterns
+            SUSP_HTTP = ["gate.php", "panel", "upload", "cmd", "api.php", "bot"]
+            if any(s in dom for s in SUSP_HTTP):
+                rows.append({
+                    'INDICATOR': r.get('DOMAIN',''), 
+                    'TYPE': 'Suspicious HTTP pattern', 
+                    'SCORE': 65, 
+                    'COUNT': int(r.get('COUNT',0)),
+                    'SRC_IP': None,
+                    'DST_IP': None,
+                    'GRAPH_SKIP': True
+                })
+            
+            # Missing or suspicious User-Agent
+            if not user_agent or user_agent in ['', 'Mozilla', 'curl', 'wget', 'python-requests']:
+                rows.append({
+                    'INDICATOR': r.get('DOMAIN',''),
+                    'TYPE': 'Missing/Suspicious User-Agent',
+                    'SCORE': 50,
+                    'COUNT': int(r.get('COUNT',0)),
+                    'SRC_IP': None,
+                    'DST_IP': None,
+                    'GRAPH_SKIP': True
+                })
+            
+            # POST without Referer
+            if 'post' in request and not referer:
+                rows.append({
+                    'INDICATOR': r.get('DOMAIN',''),
+                    'TYPE': 'POST Request without Referer',
+                    'SCORE': 55,
+                    'COUNT': int(r.get('COUNT',0)),
+                    'SRC_IP': None,
+                    'DST_IP': None,
+                    'GRAPH_SKIP': True
+                })
+            
+            # Base64 in URL
+            if is_base64_encoded(request.split('?')[1] if '?' in request else ''):
+                rows.append({
+                    'INDICATOR': r.get('DOMAIN',''),
+                    'TYPE': 'Base64-Encoded Query Parameters',
+                    'SCORE': 60,
+                    'COUNT': int(r.get('COUNT',0)),
+                    'SRC_IP': None,
+                    'DST_IP': None,
+                    'GRAPH_SKIP': True
+                })
+            
+            # Unusual Content-Type
+            if content_type and content_type not in ['text/html', 'application/json', 'text/plain', 'application/x-www-form-urlencoded']:
+                rows.append({
+                    'INDICATOR': r.get('DOMAIN',''),
+                    'TYPE': f'Unusual Content-Type: {content_type}',
+                    'SCORE': 45,
+                    'COUNT': int(r.get('COUNT',0)),
+                    'SRC_IP': None,
+                    'DST_IP': None,
+                    'GRAPH_SKIP': True
+                })
+
+    # Encrypted payload detection from TCP
+    if not tcpA.empty:
+        for _, r in tcpA.iterrows():
+            payload_ent = r.get('PAYLOAD_ENTROPY', 0.0)
+            if payload_ent >= PAYLOAD_ENTROPY_THRESHOLD:
+                src_ip = r.get('SRC_IP', '')
+                dst_ip = r.get('DST_IP', '')
+                rows.append({
+                    'INDICATOR': f"{src_ip} → {dst_ip}",
+                    'TYPE': 'High Payload Entropy (likely encrypted)',
+                    'SCORE': 65,
                     'COUNT': int(r.get('COUNT',0)),
                     'SRC_IP': src_ip,
                     'DST_IP': dst_ip
@@ -382,22 +701,6 @@ def compute_c2_heuristics(dnsA, httpA, tlsA, tcpA):
                     })
     except Exception:
         pass
-
-    # Suspicious HTTP patterns
-    SUSP_HTTP = ["gate.php", "panel", "upload", "cmd", "api.php", "bot"]
-    if not httpA.empty:
-        for _, r in httpA.iterrows():
-            dom = (r.get('DOMAIN','') or '').lower()
-            if any(s in dom for s in SUSP_HTTP):
-                rows.append({
-                    'INDICATOR': r.get('DOMAIN',''), 
-                    'TYPE': 'Suspicious HTTP pattern', 
-                    'SCORE': 65, 
-                    'COUNT': int(r.get('COUNT',0)),
-                    'SRC_IP': None,
-                    'DST_IP': None,
-                    'GRAPH_SKIP': True
-                })
 
     # Rare JA3 and correlation with entropy - HAS IP DATA
     try:
@@ -518,14 +821,22 @@ def compute_advanced_heuristics(dnsA, httpA, tlsA, tcpA, timeline_list):
 # -----------------------
 # Beaconing detection
 # -----------------------
-def detect_beaconing(tcp_rows, min_count=12, max_cv=0.35, min_period=1, max_period=86400):
+def detect_beaconing(tcp_rows, min_count=None, max_cv=None, min_period=1, max_period=86400):
+    """Enhanced beaconing detection with jitter tolerance and burst detection."""
     import math
+    
+    # Use configurable thresholds
+    if min_count is None:
+        min_count = BEACONING_MIN_COUNT
+    if max_cv is None:
+        max_cv = BEACONING_CV_THRESHOLD
+    
     rows = []
     if tcp_rows.empty:
-        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV'])
+        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV','SRC_IP','DST_IP'])
     try:
         if 'TS' not in tcp_rows.columns:
-            return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV'])
+            return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV','SRC_IP','DST_IP'])
         grp = tcp_rows.groupby(['SRC_IP','DST_IP'])
         for (src,dst), g in grp:
             times = sorted(g['TS'].dropna().astype(float).tolist())
@@ -540,21 +851,71 @@ def detect_beaconing(tcp_rows, min_count=12, max_cv=0.35, min_period=1, max_peri
             cv = std/mean if mean>0 else 999
             if mean < min_period or mean > max_period:
                 continue
+            
+            # Regular beaconing with jitter tolerance (increased CV threshold)
             if cv <= max_cv:
                 score = int(min(100, 70 + (1 - cv) * 30 + min(20, (len(times)-min_count)//5)))
-                rows.append({'INDICATOR': f"{src} → {dst}", 'TYPE':'Periodic beaconing (low CV)', 'SCORE': score, 'COUNT': len(times), 'MEAN_PERIOD': round(mean,2), 'CV': round(cv,3)})
+                rows.append({
+                    'INDICATOR': f"{src} → {dst}", 
+                    'TYPE':'Periodic beaconing (low CV)', 
+                    'SCORE': score, 
+                    'COUNT': len(times), 
+                    'MEAN_PERIOD': round(mean,2), 
+                    'CV': round(cv,3),
+                    'SRC_IP': src,
+                    'DST_IP': dst
+                })
+            
+            # Connection burst detection (many connections in short time)
+            if len(times) >= 5:
+                # Check for bursts: 5+ connections within 60 seconds
+                for i in range(len(times) - 4):
+                    burst_window = times[i+4] - times[i]
+                    if burst_window <= 60:  # 5 connections within 60 seconds
+                        rows.append({
+                            'INDICATOR': f"{src} → {dst}",
+                            'TYPE': 'Connection Burst Pattern',
+                            'SCORE': 60,
+                            'COUNT': len(times),
+                            'MEAN_PERIOD': round(mean,2),
+                            'CV': round(cv,3),
+                            'SRC_IP': src,
+                            'DST_IP': dst
+                        })
+                        break
+            
+            # Sleep pattern analysis: short connections followed by long pauses
+            if len(diffs) >= 3:
+                long_pauses = [d for d in diffs if d > 300]  # pauses > 5 minutes
+                short_intervals = [d for d in diffs if d < 60]  # intervals < 1 minute
+                if len(long_pauses) >= 2 and len(short_intervals) >= 2:
+                    rows.append({
+                        'INDICATOR': f"{src} → {dst}",
+                        'TYPE': 'Sleep Pattern (bursts + long pauses)',
+                        'SCORE': 65,
+                        'COUNT': len(times),
+                        'MEAN_PERIOD': round(mean,2),
+                        'CV': round(cv,3),
+                        'SRC_IP': src,
+                        'DST_IP': dst
+                    })
+                    
     except Exception:
         pass
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV'])
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV','SRC_IP','DST_IP'])
 
 # -----------------------
 # DNS tunneling detection
 # -----------------------
 def detect_dnstunneling(dns_df):
+    """Enhanced DNS tunneling detection with hex encoding, unique subdomains, and TXT record analysis."""
     rows = []
     if dns_df.empty:
         return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','NOTES'])
     try:
+        # Track unique subdomains per base domain
+        subdomain_map = {}
+        
         for _, r in dns_df.iterrows():
             dom = (r.get('DOMAIN','') or '').strip()
             if not dom: continue
@@ -562,19 +923,57 @@ def detect_dnstunneling(dns_df):
             ent = shannon_entropy(dom); notes = []; score = 0
             base64_like = re.compile(r'^[A-Za-z0-9+/=]{8,}$')
             base32_like = re.compile(r'^[A-Z2-7]{8,}$')
+            hex_like = re.compile(r'^[0-9a-fA-F]{16,}$')
+            
+            # Track unique subdomains
+            if label_count >= 2:
+                base_domain = '.'.join(labels[-2:])
+                subdomain = '.'.join(labels[:-2]) if label_count > 2 else ''
+                if subdomain:
+                    subdomain_map.setdefault(base_domain, set()).add(subdomain)
+            
             if length >= 80:
                 score += 30; notes.append('long-name')
             if label_count >= 6:
                 score += 20; notes.append('many-labels')
+            
+            # Check each label for encoding patterns
             for lab in labels:
                 if base64_like.match(lab):
                     score += 25; notes.append('base64-like-label'); break
                 if base32_like.match(lab):
                     score += 20; notes.append('base32-like-label'); break
+                if hex_like.match(lab):
+                    score += 25; notes.append('hex-encoded-label'); break
+            
             if ent >= 4.0:
                 score += 25; notes.append('high-entropy')
-            if score >= 40:
-                rows.append({'INDICATOR': dom, 'TYPE':'Possible DNS tunneling', 'SCORE': min(100, score), 'COUNT': int(r.get('COUNT',0)), 'NOTES': ";".join(notes)})
+            
+            # Check for TXT/NULL record patterns (simplified check)
+            # In real implementation, would need to check query type from DNS packet
+            if length > 100:
+                score += 15; notes.append('large-query')
+            
+            if score >= DNS_TUNNEL_MIN_SCORE:
+                rows.append({
+                    'INDICATOR': dom, 
+                    'TYPE':'Possible DNS tunneling', 
+                    'SCORE': min(100, score), 
+                    'COUNT': int(r.get('COUNT',0)), 
+                    'NOTES': ";".join(notes)
+                })
+        
+        # Detect unique subdomain per query pattern
+        for base_domain, subdomains in subdomain_map.items():
+            if len(subdomains) >= 10:  # Many unique subdomains
+                rows.append({
+                    'INDICATOR': base_domain,
+                    'TYPE': 'DNS Tunneling (unique subdomains)',
+                    'SCORE': 75,
+                    'COUNT': len(subdomains),
+                    'NOTES': f'{len(subdomains)} unique subdomains'
+                })
+                
     except Exception:
         pass
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','NOTES'])
@@ -1006,14 +1405,23 @@ def pipeline(pcap=FILE_PCAP):
         httpA = agg(http, ['DOMAIN'])
 
         print("[4/11] Aggregating TLS (ensure columns exist)...")
-        tls_cols = ['SNI', 'JA3', 'SRC_IP', 'DST_IP']
+        tls_cols = ['SNI', 'JA3', 'JA3S', 'SRC_IP', 'DST_IP', 'SRC_PORT', 'DST_PORT', 'CERT_SELF_SIGNED']
         for col in tls_cols:
             if col not in tls.columns:
                 tls[col] = None
         tlsA = agg(tls, tls_cols)
 
         print("[5/11] Aggregating TCP...")
-        tcpA = agg(tcp, ['SRC_IP', 'DST_IP', 'FLAGS'])
+        tcp_cols = ['SRC_IP', 'DST_IP', 'SRC_PORT', 'DST_PORT', 'FLAGS']
+        for col in tcp_cols:
+            if col not in tcp.columns:
+                tcp[col] = None
+        tcpA = agg(tcp, tcp_cols)
+        
+        # Also aggregate payload metrics separately for analysis
+        if 'PAYLOAD_ENTROPY' in tcp.columns and 'PAYLOAD_SIZE' in tcp.columns:
+            tcp['PAYLOAD_ENTROPY'] = tcp['PAYLOAD_ENTROPY'].fillna(0.0)
+            tcp['PAYLOAD_SIZE'] = tcp['PAYLOAD_SIZE'].fillna(0)
 
         print("[6/11] Building HTTP Timeline...")
         timeline = {}
