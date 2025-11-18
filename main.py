@@ -1590,27 +1590,27 @@ function renderC2Graph(containerId, data){
         animationEasing: 'ease-out',
         
         // ✅ CRITICAL: Better spacing parameters
-        nodeRepulsion: 25000,  // Increased from 20000
-        idealEdgeLength: 180,  // Increased from 150
+        nodeRepulsion: 30000,  // Increased from 25000
+        idealEdgeLength: 200,  // Increased from 180
         edgeElasticity: 100,
         
         // ✅ Prevent top-clustering
-        componentSpacing: 120,  // Increased
+        componentSpacing: 150,  // Increased from 120
         nestingFactor: 1.2,
-        gravity: 0.5,  // REDUCED from 1 to spread vertically
+        gravity: 0.1,  // REDUCED from 0.5 to spread vertically even more
         
         // ✅ Better convergence
-        numIter: 3000,  // Increased
+        numIter: 4000,  // Increased from 3000
         initialTemp: 1000,
         coolingFactor: 0.99,
         minTemp: 1.0,
         
         // ✅ Use available space
         fit: true,  // Auto-fit to container
-        padding: 60,  // Increased from 50
+        padding: 80,  // Increased from 60 for more edge spacing
         randomize: false,
         avoidOverlap: true,  // Prevent node overlap
-        avoidOverlapPadding: 25  // Increased from 20
+        avoidOverlapPadding: 30  // Increased from 25
       },
       minZoom: 0.2,
       maxZoom: 4,
@@ -1618,7 +1618,7 @@ function renderC2Graph(containerId, data){
       
       // ✅ Auto-fit after layout completes
       ready: function(){
-        this.fit(60);  // Increased padding from 50
+        this.fit(80);  // Increased padding from 60
         this.center();
       }
     });
@@ -1632,7 +1632,7 @@ function renderC2Graph(containerId, data){
     
     // ✅ Re-fit after layout animation completes
     setTimeout(() => {
-      cy.fit(60);  // Increased padding from 50
+      cy.fit(80);  // Increased padding from 60
     }, 600);
     
   }catch(e){
