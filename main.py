@@ -1940,13 +1940,13 @@ canvas{
 /* Graph containers - INCREASED SIZE */
 #c2graph, #ddosgraph {
   width: 100%;
-  height: 700px;  /* ✅ Increased from 500px to 700px for more workspace */
+  height: 750px;  /* ✅ Increased from 700px to 750px to fill larger workspace */
   border: 1px solid #e5e7eb;
   background: #fafbfc;
   border-radius: 8px;
   position: relative;
   margin-top: 8px;
-  min-height: 700px;  /* ✅ Ensure minimum height */
+  min-height: 750px;  /* ✅ Ensure minimum height */
   flex-shrink: 0;  /* ✅ Prevent flex shrinking */
 }
 
@@ -1995,11 +1995,11 @@ body.dark .card-full h3 {
 
 @media (min-width: 1400px) {
   #c2graph, #ddosgraph {
-    height: 800px;  /* ✅ Even taller on large screens for better workspace */
+    height: 850px;  /* ✅ Increased from 800px to match larger card workspace */
   }
   
   .card-full {
-    min-height: 850px;  /* ✅ Match card height to graph container */
+    min-height: 900px;  /* ✅ Increased to accommodate larger graphs */
   }
 }
 
