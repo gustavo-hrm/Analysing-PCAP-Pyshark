@@ -3,7 +3,7 @@
 Network traffic analysis tool with ML-enhanced DDoS & C2 detection and comprehensive protocol coverage.
 
 ## Version
-**Stability v22.0** - ML-Enhanced DDoS & C2 Detection with Priority 3 Protocol Coverage
+**Stability v23.0** - Multi-Source PCAP Correlation with ML-Enhanced Detection
 
 ## Features
 
@@ -37,6 +37,14 @@ Network traffic analysis tool with ML-enhanced DDoS & C2 detection and comprehen
 - **IRC** (Ports 6667, 6697, 194): C2 channel detection
 - **P2P** (BitTorrent DHT): Malware distribution detection
 
+### Multi-Source Correlation ✨ NEW
+- **Shared C2 Infrastructure**: Detects same C2 IPs, domains, JA3 fingerprints across networks
+- **Coordinated Attacks**: Identifies DDoS campaigns and botnet activity across sources
+- **Lateral Movement**: Tracks attackers moving between monitored networks
+- **Beacon Synchronization**: Detects synchronized C2 beacons (shared heartbeat patterns)
+- **Cross-Network Analysis**: Correlates threats across 2+ PCAP sources
+- **Confidence Scoring**: ML-based confidence scores for correlation detections
+
 ## Installation
 
 ### Requirements
@@ -54,12 +62,26 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Basic Usage
+### Basic Usage (Single File)
 ```bash
 python3 main.py
 ```
 
-### Custom PCAP File
+### Multi-Source Analysis
+Analyze multiple PCAP files from different network sensors:
+
+```bash
+# Multiple sources with custom names
+python3 main.py --sources monitor1:capture1.pcap monitor2:capture2.pcap monitor3:capture3.pcap
+
+# Using wildcard pattern
+python3 main.py --sources-dir /pcaps/*.pcap
+
+# Simple file list (uses filenames as source IDs)
+python3 main.py --sources file1.pcap file2.pcap file3.pcap
+```
+
+### Custom PCAP File (Legacy)
 Edit `FILE_PCAP` variable in main.py:
 ```python
 FILE_PCAP = "your_capture.pcapng"
@@ -107,6 +129,14 @@ Open `dashboard.html` in a web browser to view the analysis.
 - P2P malware distribution
 - Protocol threat summary
 
+### Multi-Source Correlation
+- Source metadata (file names, packet counts)
+- Shared C2 infrastructure across sources
+- Coordinated attack patterns (DDoS, botnets)
+- Lateral movement detection (cross-network)
+- Synchronized beacon timing
+- Confidence-scored correlations
+
 ## Testing
 
 ### Run All Tests
@@ -148,6 +178,29 @@ Adjust detection thresholds:
 SMB_LATERAL_THRESHOLD = 5       # Hosts accessed
 RDP_BRUTE_THRESHOLD = 10        # Failed attempts
 SSH_BRUTE_THRESHOLD = 10        # Failed attempts
+FTP_EXFIL_SIZE = 10485760       # 10MB
+SMTP_MASS_MAIL_THRESHOLD = 50   # Emails per minute
+```
+
+### Multi-Source Correlation Settings
+Configure correlation parameters in main.py:
+```python
+MULTI_SOURCE_ENABLED = True              # Enable/disable correlation
+CORRELATION_TIME_WINDOW = 300            # 5 minutes for temporal correlation
+MIN_SOURCES_FOR_CORRELATION = 2          # Minimum sources to correlate
+CORRELATION_CONFIDENCE_THRESHOLD = 0.7   # Minimum confidence (0.0-1.0)
+```
+
+**How Correlation Works**:
+1. **Shared C2**: Same IP/domain/JA3 in 2+ sources → Confidence +10 per source
+2. **Attack Patterns**: Same attack type/target within time window → Confidence starts at 70
+3. **Lateral Movement**: Same attacker IP in multiple sources → Confidence +8 per source
+4. **Beacons**: Similar interval timing (±10s buckets) → Confidence starts at 80
+
+**Minimum Requirements**:
+- At least 2 sources required (configurable)
+- SOURCE_ID automatically tracked in all packet data
+- Temporal correlation uses 5-minute sliding window
 FTP_EXFIL_SIZE = 10485760       # 10MB
 SMTP_MASS_MAIL_THRESHOLD = 50   # Emails per minute
 ```
@@ -210,6 +263,55 @@ DGA_MIN_SCORE = 60              # DGA detection threshold
 - Tracks internal-to-external P2P
 - Score: 85/100 with 30+ peers
 
+## Multi-Source Correlation Examples
+
+### Shared C2 Infrastructure Detection
+**Scenario**: Same C2 domain detected across 3 different network sensors
+```
+C2 Indicator: malicious-c2.example.com
+Sources: datacenter1, office-network, remote-site
+Source Count: 3
+Confidence: 90/100
+Type: Shared C2 Infrastructure
+```
+**Interpretation**: All three networks are compromised by the same threat actor using shared C2 infrastructure.
+
+### Coordinated DDoS Attack
+**Scenario**: Simultaneous SYN flood detected from multiple locations
+```
+Attack Pattern: SYN_FLOOD_10.0.0.1
+Sources: sensor-east, sensor-west, sensor-central
+Source Count: 3
+Time Spread: 120s (within 5-minute window)
+Confidence: 85/100
+Type: Coordinated DDoS Attack
+```
+**Interpretation**: Distributed attack targeting same victim across network segments - likely botnet activity.
+
+### Lateral Movement Detection
+**Scenario**: Attacker IP active in multiple monitored networks
+```
+Attacker IP: 192.168.100.50
+Sources: dmz-network, internal-lan, production-vlan
+Source Count: 3
+Activities: SMB Lateral, RDP Brute Force, SSH Scanning
+Avg Threat Score: 87.5
+Confidence: 91/100
+```
+**Interpretation**: Clear lateral movement pattern - attacker pivoting through networks after initial compromise.
+
+### Synchronized C2 Beacons
+**Scenario**: Coordinated C2 check-ins across networks
+```
+Beacon Destination: 203.0.113.10
+Avg Interval: 60.3s
+Sources: branch-office-1, branch-office-2, headquarters
+Source Count: 3
+Confidence: 92/100
+Type: Synchronized C2 Beacon
+```
+**Interpretation**: Multiple infected hosts checking in with C2 on same schedule - coordinated botnet activity.
+
 ## Security
 
 ### CodeQL Analysis
@@ -248,6 +350,19 @@ See CONTRIBUTING.md for development guidelines.
 - Priority 3 enhancement: GitHub Copilot
 
 ## Changelog
+
+### v23.0 (2025-11-19) - Multi-Source PCAP Correlation
+- ✨ **Multi-source analysis**: Analyze 2+ PCAP files simultaneously
+- 🎯 **Shared C2 infrastructure detection**: Same IPs, domains, JA3 fingerprints across sources
+- ⚔️ **Coordinated attack correlation**: DDoS campaigns and botnet activity detection
+- 🔄 **Lateral movement tracking**: Attackers moving between monitored networks
+- 📡 **Beacon synchronization**: Synchronized C2 beacons (shared heartbeat patterns)
+- 📊 **SOURCE_ID tracking**: All packets tagged with source identifier
+- 🎨 **Enhanced dashboard**: 5 new correlation tables with confidence scoring
+- 🧪 **Comprehensive testing**: 8 new multi-source tests + integration tests
+- 📝 **Command-line interface**: `--sources` and `--sources-dir` arguments
+- ♻️ **Backward compatible**: Single-file analysis still works
+- 0 security vulnerabilities (CodeQL verified)
 
 ### v22.0 (2025-11-19) - Priority 3: Expanded Protocol Coverage
 - Added SMB/CIFS lateral movement detection
