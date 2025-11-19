@@ -3374,6 +3374,27 @@ function updateDashboard(){
     mlCountEl.style.color = (attackCount + (mlAnomalies||[]).length) > 0 ? '#dc2626' : '#10b981';
   }
 
+  // ✅ PRIORITY 2: Change Point Detection table
+  const cpSlice = (changePointsData||[]).slice(0, topN);
+  if(document.querySelector('#tbl_change_points tbody')) {
+    renderTableRows(document.querySelector('#tbl_change_points tbody'), cpSlice,
+      ['timestamp','value','deviation','cusum_pos','cusum_neg']);
+  }
+  
+  // ✅ PRIORITY 2: Flow Anomalies table
+  const flowAnomalySlice = (flowAnomaliesData||[]).slice().sort((a,b)=>(b.anomaly_score||0)-(a.anomaly_score||0)).slice(0,topN);
+  if(document.querySelector('#tbl_flow_anomalies tbody')) {
+    renderTableRows(document.querySelector('#tbl_flow_anomalies tbody'), flowAnomalySlice,
+      ['flow_id','src_ip','dst_ip','anomaly_score','anomaly_reasons']);
+  }
+  
+  // ✅ PRIORITY 2: Bidirectional Flow table
+  const bidirSlice = (bidirectionalAnomaliesData||[]).slice().sort((a,b)=>(b.asymmetry_score||0)-(a.asymmetry_score||0)).slice(0,topN);
+  if(document.querySelector('#tbl_bidirectional tbody')) {
+    renderTableRows(document.querySelector('#tbl_bidirectional tbody'), bidirSlice,
+      ['flow_id','src_ip','dst_ip','asymmetry_score','packet_ratio','byte_ratio','anomaly_type']);
+  }
+
   // ------------------------
   // PIVOT
   // ------------------------
@@ -3443,6 +3464,45 @@ function updateDashboard(){
     }
   }catch(e){
     console.log('timeline err', e);
+  }
+  
+  // ✅ PRIORITY 2: Change Points Chart
+  try{
+    const cpCanvas = document.getElementById('chart_change_points');
+    if(cpCanvas && changePointsData && changePointsData.length > 0){
+      const ctx = prepareCanvas(cpCanvas, 220);
+      if(ctx){
+        window._change_points = new Chart(ctx, {
+          type:'scatter',
+          data:{
+            datasets:[{
+              label:'Change Points',
+              data: changePointsData.map(cp => ({
+                x: cp.timestamp || 0,
+                y: cp.value || 0,
+                r: Math.min(10, (cp.deviation || 0))
+              })),
+              backgroundColor: 'rgba(220, 38, 38, 0.7)',
+              borderColor: 'rgba(220, 38, 38, 1)',
+              pointRadius: 6
+            }]
+          },
+          options:{
+            responsive:false,
+            animation:false,
+            legend:{ display:false },
+            scales:{
+              xAxes:[{ type:'linear', position:'bottom', scaleLabel:{ display:true, labelString:'Time' } }],
+              yAxes:[{ scaleLabel:{ display:true, labelString:'Traffic Value' } }]
+            }
+          }
+        });
+      }
+    } else if(cpCanvas) {
+      cpCanvas.parentElement.innerHTML = '<p style="text-align:center;opacity:0.6;padding:40px">No change points detected</p>';
+    }
+  }catch(e){
+    console.log('change points chart err', e);
   }
 
   setTimeout(()=>{ try{ $('.display').DataTable().columns.adjust(false); }catch(e){} }, 80);
@@ -3835,6 +3895,28 @@ button:hover {
   <h3>🤖 ML Anomaly Detection (Isolation Forest)</h3>
   <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Zero-day attack detection using Isolation Forest for outlier identification</p>
   <div class='table-wrap'><table id='tbl_ml_anomalies' class='display'><thead><tr><th>SRC IP</th><th>Protocol</th><th>Anomaly Score</th><th>Baseline Deviation</th><th>Packet Rate</th><th>Unique Destinations</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<!-- ✅ PRIORITY 2: Change Point Detection -->
+<div style='margin-top:18px' class='card'>
+  <h3>📊 Change Point Detection (CUSUM)</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Detects abrupt changes in traffic patterns using CUSUM algorithm</p>
+  <div id='chart_change_points' style='height:220px;margin-bottom:12px'></div>
+  <div class='table-wrap'><table id='tbl_change_points' class='display'><thead><tr><th>Timestamp</th><th>Value</th><th>Deviation (σ)</th><th>CUSUM+</th><th>CUSUM-</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<!-- ✅ PRIORITY 2: Flow Analysis -->
+<div style='margin-top:18px' class='card'>
+  <h3>🌊 Flow-Level Anomalies</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Statistical analysis of network flows (5-tuple aggregation)</p>
+  <div class='table-wrap'><table id='tbl_flow_anomalies' class='display'><thead><tr><th>Flow ID</th><th>SRC IP</th><th>DST IP</th><th>Anomaly Score</th><th>Reasons</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<!-- ✅ PRIORITY 2: Bidirectional Flow Analysis -->
+<div style='margin-top:18px' class='card'>
+  <h3>⇄ Bidirectional Flow Analysis</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Detects asymmetric flows that may indicate data exfiltration or C2</p>
+  <div class='table-wrap'><table id='tbl_bidirectional' class='display'><thead><tr><th>Flow ID</th><th>SRC IP</th><th>DST IP</th><th>Asymmetry Score</th><th>Packet Ratio</th><th>Byte Ratio</th><th>Type</th></tr></thead><tbody></tbody></table></div>
 </div>
 
 <div style='margin-top:18px' class='card'>
