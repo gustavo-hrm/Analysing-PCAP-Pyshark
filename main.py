@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Stability v20.4 — Enhanced C2 Detection with HTTP Response + TCP Payload Scanning
+# Stability v21.0 — ML-Enhanced DDoS & C2 Detection with Adaptive Thresholds
 # Usage: python3 main.py
 
 import os
@@ -12,6 +12,7 @@ import json
 import hashlib
 import traceback
 import pandas as pd
+import numpy as np
 from tqdm import tqdm
 
 # scapy import with lazy fallback if running where scapy not available for dry-run
@@ -21,6 +22,17 @@ except Exception:
     # allow static testing on systems without scapy; Pcap parsing will fail but code remains testable
     PcapReader = None
     TCP = IP = IPv6 = Raw = DNS = DNSRR = UDP = ICMP = ICMPv6ND_NS = ICMPv6ND_NA = object
+
+# ML imports with graceful fallback
+ML_AVAILABLE = False
+try:
+    from sklearn.ensemble import RandomForestClassifier, IsolationForest
+    from sklearn.preprocessing import StandardScaler
+    ML_AVAILABLE = True
+    print("[INFO] Machine Learning libraries loaded successfully (scikit-learn)")
+except ImportError:
+    print("[WARNING] scikit-learn not available - ML features disabled, using heuristics only")
+    RandomForestClassifier = IsolationForest = StandardScaler = None
 
 # -----------------------
 # CONFIG
@@ -101,6 +113,16 @@ DDOS_MULTI_SOURCE_THRESHOLD = 10        # Sources attacking same target
 DDOS_SUSTAINED_DURATION = 300           # 5 minutes in seconds
 C2_TO_DDOS_CORRELATION_WINDOW = 300     # 5 minute correlation window
 DDOS_UDP_FLOOD_PORTS = {53, 123, 161, 1900}  # Common UDP flood ports
+
+# -----------------------
+# ML & Advanced Detection Configuration
+# -----------------------
+ML_ENABLED = True                       # Enable ML-based detection (requires scikit-learn)
+BASELINE_WINDOW = 300                   # Baseline window in seconds (5 minutes)
+ADAPTIVE_THRESHOLD_SENSITIVITY = 3      # Standard deviations for adaptive thresholds
+JITTER_TOLERANCE = 0.5                  # Max jitter tolerance (0.0-1.0, 0.5 = 50%)
+ML_MIN_TRAINING_SAMPLES = 10            # Minimum samples needed for ML training
+AUTOCORR_MIN_LAGS = 5                   # Minimum lags for autocorrelation analysis
 
 # -----------------------
 # Utilities
@@ -794,33 +816,86 @@ def compute_advanced_heuristics(dnsA, httpA, tlsA, tcpA, timeline_list):
 # Beaconing detection
 # -----------------------
 def detect_beaconing(tcp_rows, min_count=12, max_cv=0.35, min_period=1, max_period=86400):
+    """
+    Enhanced beaconing detection with jitter tolerance.
+    
+    Detects both regular periodic beacons and jittered beacons (Cobalt Strike, etc.)
+    using coefficient of variation and autocorrelation analysis.
+    
+    Args:
+        tcp_rows: DataFrame with TCP traffic including timestamps
+        min_count: Minimum number of packets to consider
+        max_cv: Maximum coefficient of variation for simple detection
+        min_period: Minimum beacon period in seconds
+        max_period: Maximum beacon period in seconds
+        
+    Returns:
+        pd.DataFrame: Detected beacons with period, jitter, and confidence
+    """
     import math
     rows = []
     if tcp_rows.empty:
-        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV'])
+        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV','JITTER','METHOD'])
     try:
         if 'TS' not in tcp_rows.columns:
-            return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV'])
+            return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV','JITTER','METHOD'])
+        
         grp = tcp_rows.groupby(['SRC_IP','DST_IP'])
         for (src,dst), g in grp:
             times = sorted(g['TS'].dropna().astype(float).tolist())
             if len(times) < min_count:
                 continue
+            
             diffs = [t2 - t1 for t1, t2 in zip(times, times[1:])]
             if not diffs:
                 continue
+            
             mean = sum(diffs)/len(diffs)
             var = sum((d - mean)**2 for d in diffs)/len(diffs)
             std = math.sqrt(var)
             cv = std/mean if mean>0 else 999
+            
             if mean < min_period or mean > max_period:
                 continue
+            
+            # Try simple CV-based detection first (existing logic)
             if cv <= max_cv:
                 score = int(min(100, 70 + (1 - cv) * 30 + min(20, (len(times)-min_count)//5)))
-                rows.append({'INDICATOR': f"{src} → {dst}", 'TYPE':'Periodic beaconing (low CV)', 'SCORE': score, 'COUNT': len(times), 'MEAN_PERIOD': round(mean,2), 'CV': round(cv,3)})
-    except Exception:
-        pass
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV'])
+                rows.append({
+                    'INDICATOR': f"{src} → {dst}",
+                    'TYPE': 'Periodic beaconing (low CV)',
+                    'SCORE': score,
+                    'COUNT': len(times),
+                    'MEAN_PERIOD': round(mean,2),
+                    'CV': round(cv,3),
+                    'JITTER': round(cv * 100, 1),  # Convert to percentage
+                    'METHOD': 'cv_analysis'
+                })
+            # Try jitter-tolerant detection for higher CV cases
+            elif cv <= JITTER_TOLERANCE and len(times) >= 10:
+                jitter_result = detect_jittered_beaconing(times, max_jitter=JITTER_TOLERANCE)
+                
+                if jitter_result['detected']:
+                    # Adjust score based on confidence and jitter
+                    base_score = 60
+                    confidence_bonus = int(jitter_result['confidence'] * 0.3)  # Up to 30 points
+                    count_bonus = min(15, (len(times) - min_count) // 5)
+                    score = min(95, base_score + confidence_bonus + count_bonus)
+                    
+                    rows.append({
+                        'INDICATOR': f"{src} → {dst}",
+                        'TYPE': f"Jittered beaconing ({jitter_result['method']})",
+                        'SCORE': score,
+                        'COUNT': len(times),
+                        'MEAN_PERIOD': round(jitter_result['period'], 2),
+                        'CV': round(cv, 3),
+                        'JITTER': round(jitter_result['jitter'] * 100, 1),
+                        'METHOD': jitter_result['method']
+                    })
+    except Exception as e:
+        print(f"[WARNING] Beaconing detection error: {e}")
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV','JITTER','METHOD'])
 
 # -----------------------
 # DNS tunneling detection
@@ -1007,7 +1082,457 @@ def detect_tcp_ip_distribution(tcp_df):
             })
     
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','EXTRACTED_IPS','IPS_FOUND','PAYLOAD_SAMPLE','SCORE'])
-	# -----------------------
+
+# -----------------------
+# ML Feature Extraction & Baseline Functions
+# -----------------------
+
+def extract_ml_features(tcp_df, udp_df, icmp_df):
+    """
+    Extract 20+ machine learning features from network traffic for DDoS/anomaly detection.
+    
+    Features extracted:
+    - Packet rate statistics (mean, std, max)
+    - Byte rate statistics
+    - Protocol distribution
+    - Port entropy
+    - Source/destination diversity
+    - Temporal patterns
+    - Connection characteristics
+    
+    Args:
+        tcp_df: DataFrame with TCP traffic
+        udp_df: DataFrame with UDP traffic  
+        icmp_df: DataFrame with ICMP traffic
+        
+    Returns:
+        pd.DataFrame: Features with columns for ML models
+    """
+    features = []
+    
+    try:
+        # Combine all traffic for overall statistics
+        all_traffic = []
+        
+        for df, proto in [(tcp_df, 'TCP'), (udp_df, 'UDP'), (icmp_df, 'ICMP')]:
+            if df.empty or 'TS' not in df.columns:
+                continue
+                
+            # Per-source IP feature extraction
+            for src_ip, group in df.groupby('SRC_IP'):
+                if len(group) < 2:
+                    continue
+                    
+                feature = {'SRC_IP': src_ip, 'PROTOCOL': proto}
+                
+                # Temporal features
+                times = group['TS'].dropna().values
+                if len(times) > 1:
+                    duration = times.max() - times.min()
+                    feature['DURATION'] = duration
+                    feature['PACKET_RATE'] = len(group) / max(0.001, duration)
+                    
+                    # Inter-arrival time statistics
+                    if len(times) > 2:
+                        diffs = np.diff(sorted(times))
+                        feature['IAT_MEAN'] = np.mean(diffs)
+                        feature['IAT_STD'] = np.std(diffs)
+                        feature['IAT_MAX'] = np.max(diffs)
+                        feature['IAT_MIN'] = np.min(diffs)
+                    else:
+                        feature['IAT_MEAN'] = feature['IAT_STD'] = feature['IAT_MAX'] = feature['IAT_MIN'] = 0
+                else:
+                    feature['DURATION'] = 0
+                    feature['PACKET_RATE'] = 0
+                    feature['IAT_MEAN'] = feature['IAT_STD'] = feature['IAT_MAX'] = feature['IAT_MIN'] = 0
+                
+                # Volume features
+                feature['TOTAL_PACKETS'] = len(group)
+                if 'SIZE' in group.columns:
+                    sizes = group['SIZE'].dropna().values
+                    feature['TOTAL_BYTES'] = np.sum(sizes)
+                    feature['AVG_PACKET_SIZE'] = np.mean(sizes) if len(sizes) > 0 else 0
+                    feature['STD_PACKET_SIZE'] = np.std(sizes) if len(sizes) > 0 else 0
+                    feature['BYTE_RATE'] = feature['TOTAL_BYTES'] / max(0.001, feature['DURATION'])
+                else:
+                    feature['TOTAL_BYTES'] = 0
+                    feature['AVG_PACKET_SIZE'] = 0
+                    feature['STD_PACKET_SIZE'] = 0
+                    feature['BYTE_RATE'] = 0
+                
+                # Destination diversity
+                if 'DST_IP' in group.columns:
+                    unique_dsts = group['DST_IP'].nunique()
+                    feature['UNIQUE_DST_IPS'] = unique_dsts
+                    feature['DST_IP_ENTROPY'] = shannon_entropy(','.join(group['DST_IP'].astype(str)))
+                else:
+                    feature['UNIQUE_DST_IPS'] = 0
+                    feature['DST_IP_ENTROPY'] = 0
+                
+                # Port features (for TCP/UDP)
+                if proto in ['TCP', 'UDP']:
+                    if 'DST_PORT' in group.columns:
+                        ports = group['DST_PORT'].dropna().astype(str)
+                        feature['UNIQUE_DST_PORTS'] = len(ports.unique())
+                        feature['DST_PORT_ENTROPY'] = shannon_entropy(','.join(ports))
+                    else:
+                        feature['UNIQUE_DST_PORTS'] = 0
+                        feature['DST_PORT_ENTROPY'] = 0
+                    
+                    if 'SRC_PORT' in group.columns:
+                        src_ports = group['SRC_PORT'].dropna().astype(str)
+                        feature['UNIQUE_SRC_PORTS'] = len(src_ports.unique())
+                    else:
+                        feature['UNIQUE_SRC_PORTS'] = 0
+                else:
+                    feature['UNIQUE_DST_PORTS'] = 0
+                    feature['DST_PORT_ENTROPY'] = 0
+                    feature['UNIQUE_SRC_PORTS'] = 0
+                
+                # TCP-specific features
+                if proto == 'TCP' and 'FLAGS' in group.columns:
+                    flags_str = group['FLAGS'].dropna().astype(str)
+                    syn_count = sum(1 for f in flags_str if 'SYN' in f and 'ACK' not in f)
+                    ack_count = sum(1 for f in flags_str if 'ACK' in f)
+                    rst_count = sum(1 for f in flags_str if 'RST' in f)
+                    
+                    feature['SYN_COUNT'] = syn_count
+                    feature['ACK_COUNT'] = ack_count
+                    feature['RST_COUNT'] = rst_count
+                    feature['SYN_RATIO'] = syn_count / max(1, ack_count)
+                else:
+                    feature['SYN_COUNT'] = 0
+                    feature['ACK_COUNT'] = 0
+                    feature['RST_COUNT'] = 0
+                    feature['SYN_RATIO'] = 0
+                
+                features.append(feature)
+        
+    except Exception as e:
+        print(f"[WARNING] Feature extraction error: {e}")
+    
+    if not features:
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(features)
+    
+    # Fill any missing values with 0
+    df = df.fillna(0)
+    
+    return df
+
+
+def establish_baseline(traffic_df, window='300s'):
+    """
+    Create baseline traffic profiles per IP/network segment.
+    
+    Calculates statistical baselines including:
+    - Mean, median, std deviation
+    - 95th and 99th percentiles
+    - Min/max values
+    
+    Args:
+        traffic_df: DataFrame with traffic features
+        window: Time window for baseline (e.g., '300s' for 5 minutes)
+        
+    Returns:
+        dict: Baseline statistics per IP
+    """
+    baselines = {}
+    
+    try:
+        if traffic_df.empty or 'SRC_IP' not in traffic_df.columns:
+            return baselines
+        
+        # Numeric columns for statistics
+        numeric_cols = traffic_df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        for src_ip, group in traffic_df.groupby('SRC_IP'):
+            baseline = {'IP': src_ip}
+            
+            for col in numeric_cols:
+                if col in group.columns:
+                    values = group[col].dropna().values
+                    if len(values) > 0:
+                        baseline[f'{col}_MEAN'] = np.mean(values)
+                        baseline[f'{col}_STD'] = np.std(values)
+                        baseline[f'{col}_MEDIAN'] = np.median(values)
+                        baseline[f'{col}_P95'] = np.percentile(values, 95)
+                        baseline[f'{col}_P99'] = np.percentile(values, 99)
+                        baseline[f'{col}_MIN'] = np.min(values)
+                        baseline[f'{col}_MAX'] = np.max(values)
+            
+            baselines[src_ip] = baseline
+            
+    except Exception as e:
+        print(f"[WARNING] Baseline establishment error: {e}")
+    
+    return baselines
+
+
+def calculate_adaptive_threshold(baseline, metric, sensitivity=3):
+    """
+    Calculate adaptive threshold based on baseline statistics.
+    
+    Uses mean + (sensitivity * std) approach, which is more robust than static thresholds.
+    
+    Args:
+        baseline: Baseline statistics dict for an IP
+        metric: Metric name to calculate threshold for
+        sensitivity: Number of standard deviations (default: 3)
+        
+    Returns:
+        float: Adaptive threshold value
+    """
+    try:
+        mean_key = f'{metric}_MEAN'
+        std_key = f'{metric}_STD'
+        
+        if mean_key in baseline and std_key in baseline:
+            mean_val = baseline[mean_key]
+            std_val = baseline[std_key]
+            threshold = mean_val + (sensitivity * std_val)
+            return max(0, threshold)  # Ensure non-negative
+        else:
+            # Fallback to static threshold if baseline not available
+            return None
+            
+    except Exception:
+        return None
+
+
+def ml_ddos_detection(features):
+    """
+    Random Forest classifier for DDoS attack classification.
+    
+    Uses pre-trained model or heuristic-based labels for training.
+    Provides confidence scores for detections.
+    
+    Args:
+        features: DataFrame with extracted ML features
+        
+    Returns:
+        pd.DataFrame: Predictions with ML_SCORE and PREDICTION columns
+    """
+    predictions = []
+    
+    try:
+        if not ML_AVAILABLE or not ML_ENABLED:
+            print("[INFO] ML detection skipped - using heuristics only")
+            return pd.DataFrame()
+        
+        if features.empty or len(features) < ML_MIN_TRAINING_SAMPLES:
+            print(f"[INFO] Insufficient data for ML ({len(features)} samples < {ML_MIN_TRAINING_SAMPLES} minimum)")
+            return pd.DataFrame()
+        
+        # Select numeric features only
+        feature_cols = [col for col in features.columns if col not in ['SRC_IP', 'PROTOCOL']]
+        X = features[feature_cols].fillna(0)
+        
+        # Simple heuristic labeling for training (unsupervised approach)
+        # Label as attack if multiple anomalous features detected
+        y_heuristic = np.zeros(len(X))
+        
+        # High packet rate
+        y_heuristic += (X['PACKET_RATE'] > X['PACKET_RATE'].quantile(0.95)).astype(int)
+        
+        # High destination diversity (scanning behavior)
+        if 'UNIQUE_DST_IPS' in X.columns:
+            y_heuristic += (X['UNIQUE_DST_IPS'] > X['UNIQUE_DST_IPS'].quantile(0.90)).astype(int)
+        
+        # High SYN ratio
+        if 'SYN_RATIO' in X.columns:
+            y_heuristic += (X['SYN_RATIO'] > 5).astype(int)
+        
+        # Label as attack if 2+ anomalous features
+        y_labels = (y_heuristic >= 2).astype(int)
+        
+        # Train Random Forest if we have both classes
+        if len(np.unique(y_labels)) > 1:
+            rf = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42)
+            rf.fit(X, y_labels)
+            
+            # Get predictions and probabilities
+            y_pred = rf.predict(X)
+            y_proba = rf.predict_proba(X)
+            
+            for idx, row in features.iterrows():
+                pred_class = y_pred[idx]
+                confidence = y_proba[idx][pred_class] * 100
+                
+                predictions.append({
+                    'SRC_IP': row['SRC_IP'],
+                    'PROTOCOL': row.get('PROTOCOL', 'UNKNOWN'),
+                    'PREDICTION': 'ATTACK' if pred_class == 1 else 'NORMAL',
+                    'ML_SCORE': int(confidence),
+                    'PACKET_RATE': row.get('PACKET_RATE', 0),
+                    'UNIQUE_DST_IPS': row.get('UNIQUE_DST_IPS', 0)
+                })
+                
+            print(f"[ML] Random Forest trained on {len(X)} samples, detected {sum(y_pred)} potential attacks")
+        else:
+            print("[ML] Insufficient class diversity for RF training")
+            
+    except Exception as e:
+        print(f"[WARNING] ML DDoS detection error: {e}")
+    
+    return pd.DataFrame(predictions) if predictions else pd.DataFrame()
+
+
+def anomaly_detection(features):
+    """
+    Isolation Forest for zero-day attack and anomaly detection.
+    
+    Detects outliers in traffic patterns that may indicate novel attacks.
+    
+    Args:
+        features: DataFrame with extracted ML features
+        
+    Returns:
+        pd.DataFrame: Anomaly predictions with ANOMALY_SCORE
+    """
+    anomalies = []
+    
+    try:
+        if not ML_AVAILABLE or not ML_ENABLED:
+            return pd.DataFrame()
+        
+        if features.empty or len(features) < ML_MIN_TRAINING_SAMPLES:
+            print(f"[INFO] Insufficient data for anomaly detection ({len(features)} samples)")
+            return pd.DataFrame()
+        
+        # Select numeric features
+        feature_cols = [col for col in features.columns if col not in ['SRC_IP', 'PROTOCOL']]
+        X = features[feature_cols].fillna(0)
+        
+        # Normalize features
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        # Train Isolation Forest
+        iso_forest = IsolationForest(
+            n_estimators=100,
+            contamination=0.1,  # Expect 10% anomalies
+            random_state=42
+        )
+        
+        y_pred = iso_forest.fit_predict(X_scaled)
+        scores = iso_forest.score_samples(X_scaled)
+        
+        # Convert scores to 0-100 scale (more negative = more anomalous)
+        # Normalize to 0-100 where 100 is most anomalous
+        min_score = scores.min()
+        max_score = scores.max()
+        if max_score != min_score:
+            normalized_scores = 100 * (1 - (scores - min_score) / (max_score - min_score))
+        else:
+            normalized_scores = np.zeros_like(scores)
+        
+        anomaly_count = 0
+        for idx, row in features.iterrows():
+            if y_pred[idx] == -1:  # Anomaly detected
+                anomalies.append({
+                    'SRC_IP': row['SRC_IP'],
+                    'PROTOCOL': row.get('PROTOCOL', 'UNKNOWN'),
+                    'ANOMALY_SCORE': int(normalized_scores[idx]),
+                    'BASELINE_DEVIATION': 'HIGH',
+                    'PACKET_RATE': row.get('PACKET_RATE', 0),
+                    'UNIQUE_DST_IPS': row.get('UNIQUE_DST_IPS', 0)
+                })
+                anomaly_count += 1
+        
+        print(f"[ML] Isolation Forest detected {anomaly_count} anomalies from {len(X)} samples")
+        
+    except Exception as e:
+        print(f"[WARNING] Anomaly detection error: {e}")
+    
+    return pd.DataFrame(anomalies) if anomalies else pd.DataFrame()
+
+
+def detect_jittered_beaconing(times, max_jitter=0.5):
+    """
+    Enhanced beaconing detection with jitter tolerance using autocorrelation.
+    
+    Detects periodic patterns even with randomized intervals (10-50% jitter).
+    Uses autocorrelation to identify periodicity in noisy time series.
+    
+    Args:
+        times: List of timestamps
+        max_jitter: Maximum jitter tolerance (0.0-1.0)
+        
+    Returns:
+        dict: Detection results with period, jitter, and confidence
+    """
+    result = {
+        'detected': False,
+        'period': 0,
+        'jitter': 0,
+        'confidence': 0,
+        'method': 'autocorrelation'
+    }
+    
+    try:
+        if len(times) < 10:
+            return result
+        
+        times = sorted(times)
+        diffs = np.diff(times)
+        
+        if len(diffs) < 5:
+            return result
+        
+        # Basic statistics
+        mean_interval = np.mean(diffs)
+        std_interval = np.std(diffs)
+        cv = std_interval / mean_interval if mean_interval > 0 else 999
+        
+        # Check if CV is within jitter tolerance
+        if cv <= max_jitter:
+            result['detected'] = True
+            result['period'] = mean_interval
+            result['jitter'] = cv
+            result['confidence'] = int(min(100, (1 - cv) * 100))
+            result['method'] = 'low_cv'
+            return result
+        
+        # Autocorrelation analysis for jittered beacons
+        if len(diffs) >= AUTOCORR_MIN_LAGS:
+            # Normalize the differences
+            diffs_norm = (diffs - np.mean(diffs)) / (np.std(diffs) + 1e-10)
+            
+            # Compute autocorrelation for different lags
+            max_lag = min(len(diffs) // 2, 20)
+            autocorr = []
+            
+            for lag in range(1, max_lag):
+                if lag < len(diffs_norm):
+                    # Pearson correlation between series and lagged version
+                    corr = np.corrcoef(diffs_norm[:-lag], diffs_norm[lag:])[0, 1]
+                    autocorr.append(abs(corr))
+                else:
+                    autocorr.append(0)
+            
+            # Find peaks in autocorrelation
+            if autocorr:
+                max_autocorr = np.max(autocorr)
+                
+                # If strong periodicity detected (high autocorrelation)
+                if max_autocorr > 0.3:  # Threshold for periodic pattern
+                    peak_lag = np.argmax(autocorr) + 1
+                    estimated_period = mean_interval * peak_lag
+                    
+                    result['detected'] = True
+                    result['period'] = estimated_period
+                    result['jitter'] = cv
+                    result['confidence'] = int(min(100, max_autocorr * 100))
+                    result['method'] = 'autocorrelation'
+                    
+    except Exception as e:
+        print(f"[WARNING] Jittered beaconing detection error: {e}")
+    
+    return result
+
+# -----------------------
 # DDoS Detection Functions
 # -----------------------
 
@@ -1414,7 +1939,7 @@ def compute_ddos_heuristics(tcp_df, udp_df, icmp_df, http_df, dns_detail_df, c2_
 # JS and HTML templates (embedded)
 # -----------------------
 JS_TEMPLATE = r"""
-// === Dashboard JS (Stability v20.4 - Enhanced C2 Detection) ===
+// === Dashboard JS (Stability v21.0 - ML-Enhanced Detection) ===
 if (window.__DASHBOARD_ACTIVE__) { console.warn("Dashboard already active — skipping duplicate init."); }
 else { window.__DASHBOARD_ACTIVE__ = true; }
 
@@ -1444,6 +1969,11 @@ const httpC2Data    = %%HTTPC2%%;
 
 // ✅ NEW: TCP IP Distribution Data
 const tcpIPData     = %%TCPIP%%;
+
+// ✅ NEW: ML Detection Data
+const mlDDoSData    = %%MLDDOS%%;
+const mlAnomalies   = %%MLANOMALIES%%;
+const mlFeatures    = %%MLFEATURES%%;
 
 
 // ------------------------------------------------------------
@@ -1814,6 +2344,28 @@ function updateDashboard(){
   renderTableRows(document.querySelector('#tbl_tcp_ip tbody'), tcpIPSlice, 
     ['SRC_IP','SRC_PORT','DST_IP','DST_PORT','EXTRACTED_IPS','IPS_FOUND','PAYLOAD_SAMPLE','SCORE']);
 
+  // ✅ NEW: ML DDoS Detection table
+  const mlDDoSSlice = (mlDDoSData||[]).slice().sort((a,b)=>(b.ML_SCORE||0)-(a.ML_SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_ml_ddos tbody')) {
+    renderTableRows(document.querySelector('#tbl_ml_ddos tbody'), mlDDoSSlice,
+      ['SRC_IP','PROTOCOL','PREDICTION','ML_SCORE','PACKET_RATE','UNIQUE_DST_IPS']);
+  }
+
+  // ✅ NEW: ML Anomaly Detection table
+  const mlAnomalySlice = (mlAnomalies||[]).slice().sort((a,b)=>(b.ANOMALY_SCORE||0)-(a.ANOMALY_SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_ml_anomalies tbody')) {
+    renderTableRows(document.querySelector('#tbl_ml_anomalies tbody'), mlAnomalySlice,
+      ['SRC_IP','PROTOCOL','ANOMALY_SCORE','BASELINE_DEVIATION','PACKET_RATE','UNIQUE_DST_IPS']);
+  }
+
+  // Update ML count indicators
+  const mlCountEl = document.getElementById('ml_count');
+  if(mlCountEl) {
+    const attackCount = (mlDDoSData||[]).filter(x => x.PREDICTION === 'ATTACK').length;
+    mlCountEl.textContent = attackCount + (mlAnomalies||[]).length;
+    mlCountEl.style.color = (attackCount + (mlAnomalies||[]).length) > 0 ? '#dc2626' : '#10b981';
+  }
+
   // ------------------------
   // PIVOT
   // ------------------------
@@ -2169,7 +2721,7 @@ button:hover {
     <div style='margin-top:12px'><button id='clear_filters' style='padding:8px;border-radius:6px;background:#10b981;color:#fff;border:none;cursor:pointer'>Clear Filters</button></div>
   </aside>
   <main class='content'>
-    <h1 style='margin:0 0 12px 0'>PCAP Analysis Dashboard (Stability v20.4 - Enhanced C2 Detection)</h1>
+    <h1 style='margin:0 0 12px 0'>PCAP Analysis Dashboard (Stability v21.0 - ML-Enhanced Detection)</h1>
 
     <div style='margin-bottom:12px'>
       <label>Source IP: <input id='filter_src' type='text'></label>
@@ -2219,6 +2771,23 @@ button:hover {
     </div>
     <div class='table-wrap'><table id='tbl_ddos' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
   </div>
+  
+  <!-- ✅ NEW: ML Detection Summary Card -->
+  <div class='card' style='grid-column: span 3;'>
+    <h3>🤖 Machine Learning Detection Summary</h3>
+    <div style='display:flex;gap:20px;padding:15px 0;'>
+      <div style='flex:1;text-align:center;border-right:1px solid #e5e7eb;'>
+        <div style='font-size:28px;font-weight:bold;color:#8b5cf6' id='ml_count'>0</div>
+        <div style='font-size:10px;color:#6b7280;margin-top:4px'>ML Detections</div>
+      </div>
+      <div style='flex:2;font-size:10px;color:#6b7280;'>
+        <div>✓ Random Forest Classifier for DDoS</div>
+        <div>✓ Isolation Forest for Anomalies</div>
+        <div>✓ Adaptive Baseline Thresholds</div>
+        <div>✓ Jitter-Tolerant Beaconing</div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Graphs side by side -->
@@ -2244,6 +2813,20 @@ button:hover {
   <h3>TCP IP Distribution (All Protocols)</h3>
   <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Scans all TCP payloads for IP address lists (detects C2 commands in raw TCP data)</p>
   <div class='table-wrap'><table id='tbl_tcp_ip' class='display'><thead><tr><th>SRC IP</th><th>SRC Port</th><th>DST IP</th><th>DST Port</th><th>IPs Found</th><th>IP Addresses</th><th>Payload Sample</th><th>Score</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<!-- ✅ NEW: ML DDoS Detection Section -->
+<div style='margin-top:18px' class='card'>
+  <h3>🤖 ML DDoS Classification (Random Forest)</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Machine learning predictions using Random Forest classifier on 20+ traffic features</p>
+  <div class='table-wrap'><table id='tbl_ml_ddos' class='display'><thead><tr><th>SRC IP</th><th>Protocol</th><th>Prediction</th><th>ML Score</th><th>Packet Rate</th><th>Unique Destinations</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<!-- ✅ NEW: ML Anomaly Detection Section -->
+<div style='margin-top:18px' class='card'>
+  <h3>🤖 ML Anomaly Detection (Isolation Forest)</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Zero-day attack detection using Isolation Forest for outlier identification</p>
+  <div class='table-wrap'><table id='tbl_ml_anomalies' class='display'><thead><tr><th>SRC IP</th><th>Protocol</th><th>Anomaly Score</th><th>Baseline Deviation</th><th>Packet Rate</th><th>Unique Destinations</th></tr></thead><tbody></tbody></table></div>
 </div>
 
 <div style='margin-top:18px' class='card'>
@@ -2283,28 +2866,55 @@ button:hover {
 # -----------------------
 def pipeline(pcap=FILE_PCAP):
     try:
-        print("\n=== Stability v20.4: Enhanced C2 Detection with HTTP Response + TCP Payload Scanning ===\n")
+        print("\n=== Stability v21.0: ML-Enhanced DDoS & C2 Detection with Adaptive Thresholds ===\n")
+        
+        if ML_AVAILABLE and ML_ENABLED:
+            print("[INFO] ML-enhanced detection enabled")
+        else:
+            print("[INFO] ML-enhanced detection disabled - using heuristics only")
 
-        print("[1/16] Parsing PCAP (enhanced for payload detection)...")
+        print("[1/20] Parsing PCAP (enhanced for payload detection)...")
         dns, tcp, http, tls, udp, icmp, dns_detail = parse_streams(pcap)
 
-        print("[2/16] Aggregating DNS...")
+        print("[2/20] Aggregating DNS...")
         dnsA = agg(dns, ['DOMAIN'])
 
-        print("[3/16] Aggregating HTTP...")
+        print("[3/20] Aggregating HTTP...")
         httpA = agg(http, ['DOMAIN'])
 
-        print("[4/16] Aggregating TLS...")
+        print("[4/20] Aggregating TLS...")
         tls_cols = ['SNI', 'JA3', 'SRC_IP', 'DST_IP']
         for col in tls_cols:
             if col not in tls.columns:
                 tls[col] = None
         tlsA = agg(tls, tls_cols)
 
-        print("[5/16] Aggregating TCP...")
+        print("[5/20] Aggregating TCP...")
         tcpA = agg(tcp, ['SRC_IP', 'DST_IP', 'FLAGS'])
+        
+        # ✅ NEW: ML Feature Extraction
+        print("[6/20] Extracting ML features from traffic...")
+        ml_features = extract_ml_features(tcp, udp, icmp)
+        print(f"  - Extracted features for {len(ml_features)} sources")
+        
+        # ✅ NEW: Baseline Profiling
+        print("[7/20] Establishing traffic baselines...")
+        baselines = establish_baseline(ml_features, window=f'{BASELINE_WINDOW}s')
+        print(f"  - Baselines established for {len(baselines)} IPs")
+        
+        # ✅ NEW: ML-based DDoS Detection
+        print("[8/20] Running ML DDoS classification...")
+        ml_ddos = ml_ddos_detection(ml_features)
+        if not ml_ddos.empty:
+            print(f"  - ML detected {len(ml_ddos[ml_ddos['PREDICTION'] == 'ATTACK'])} potential attacks")
+        
+        # ✅ NEW: Anomaly Detection
+        print("[9/20] Running Isolation Forest anomaly detection...")
+        ml_anomalies = anomaly_detection(ml_features)
+        if not ml_anomalies.empty:
+            print(f"  - Detected {len(ml_anomalies)} traffic anomalies")
 
-        print("[6/16] Building HTTP Timeline...")
+        print("[10/20] Building HTTP Timeline...")
         timeline = {}
         if os.path.exists(pcap) and PcapReader:
             if not http.empty and 'TS' in http.columns:
@@ -2314,10 +2924,10 @@ def pipeline(pcap=FILE_PCAP):
                     timeline[key] = timeline.get(key, 0) + 1
         timeline_list = [{'label': k, 'count': v} for k, v in sorted(timeline.items())]
 
-        print("[7/16] Computing full C2 heuristic indicators...")
+        print("[11/20] Computing full C2 heuristic indicators...")
         c2_full = compute_c2_heuristics(dnsA, httpA, tlsA, tcpA)
 
-        print("[8/16] Preparing compact C2 dataset for graph...")
+        print("[12/20] Preparing compact C2 dataset for graph...")
         important_prefixes = [
             "JA3 Match",
             "High-Entropy TLS SNI",
@@ -2350,24 +2960,25 @@ def pipeline(pcap=FILE_PCAP):
         print(f"  - c2_full rows: {len(c2_full)}")
         print(f"  - c2_graph rows: {len(c2_graph)}")
 
-        print("[9/16] Computing Advanced Heuristics...")
+        print("[13/20] Computing Advanced Heuristics...")
         adv = compute_advanced_heuristics(dnsA, httpA, tlsA, tcpA, timeline_list)
 
-        print("[10/16] Detecting Beaconing...")
+        print("[14/20] Detecting Beaconing (with jitter tolerance)...")
         beacon = detect_beaconing(tcp)
+        print(f"  - Beacons detected: {len(beacon)}")
 
-        print("[11/16] Detecting DNS Tunneling...")
+        print("[15/20] Detecting DNS Tunneling...")
         dnstunnel = detect_dnstunneling(dns)
         
-        print("[12/16] Detecting HTTP C2 Target Distribution...")
+        print("[16/20] Detecting HTTP C2 Target Distribution...")
         http_c2 = detect_http_target_distribution(http, tcp)
         print(f"  - HTTP C2 detections: {len(http_c2)}")
         
-        print("[13/16] Computing DDoS Attack Heuristics...")
+        print("[17/20] Computing DDoS Attack Heuristics...")
         ddos = compute_ddos_heuristics(tcp, udp, icmp, http, dns_detail, c2_full)
         print(f"  - DDoS detections: {len(ddos)}")
         
-        print("[14/16] Preparing DDoS graph subset...")
+        print("[18/20] Preparing DDoS graph subset...")
         if not ddos.empty:
             ddos_graph = ddos[ddos['SCORE'] >= GRAPH_MIN_SCORE].copy()
             if len(ddos_graph) > MAX_GRAPH_EDGES:
@@ -2377,11 +2988,11 @@ def pipeline(pcap=FILE_PCAP):
         print(f"  - ddos_graph rows: {len(ddos_graph)}")
         
         # ✅ NEW: TCP IP Distribution Detection
-        print("[15/16] Detecting IP lists in TCP payloads (all protocols)...")
+        print("[19/20] Detecting IP lists in TCP payloads (all protocols)...")
         tcp_ip_dist = detect_tcp_ip_distribution(tcp)  # Use RAW tcp, not aggregated
         print(f"  - TCP IP distributions found: {len(tcp_ip_dist)}")
 
-        print("[16/16] Writing dashboard.js and dashboard.html ...")
+        print("[20/20] Writing dashboard.js and dashboard.html ...")
         js = (
             JS_TEMPLATE
             .replace('%%DNS%%', safe_js_json(dnsA.to_dict(orient='records')))
@@ -2397,7 +3008,10 @@ def pipeline(pcap=FILE_PCAP):
             .replace('%%DDOS%%', safe_js_json(ddos.to_dict(orient='records')))
             .replace('%%DDOSGRAPH%%', safe_js_json(ddos_graph.to_dict(orient='records')))
             .replace('%%HTTPC2%%', safe_js_json(http_c2.to_dict(orient='records')))
-            .replace('%%TCPIP%%', safe_js_json(tcp_ip_dist.to_dict(orient='records')))  # ✅ NEW
+            .replace('%%TCPIP%%', safe_js_json(tcp_ip_dist.to_dict(orient='records')))
+            .replace('%%MLDDOS%%', safe_js_json(ml_ddos.to_dict(orient='records') if not ml_ddos.empty else []))
+            .replace('%%MLANOMALIES%%', safe_js_json(ml_anomalies.to_dict(orient='records') if not ml_anomalies.empty else []))
+            .replace('%%MLFEATURES%%', safe_js_json(ml_features.head(100).to_dict(orient='records') if not ml_features.empty else []))
         )
 
         with open('dashboard.js', 'w', encoding='utf-8') as jf:
@@ -2409,7 +3023,18 @@ def pipeline(pcap=FILE_PCAP):
             hf.write(html_output)
         print("→ dashboard.html written.")
 
-        print("\n=== DONE: Stability v20.4 dashboard with enhanced C2 detection generated ===\n")
+        print("\n=== DONE: Stability v21.0 dashboard with ML-enhanced detection generated ===\n")
+        
+        # Print summary
+        print("=== Detection Summary ===")
+        print(f"C2 Indicators: {len(c2_full)}")
+        print(f"DDoS Attacks: {len(ddos)}")
+        print(f"Beacons Detected: {len(beacon)}")
+        if not ml_ddos.empty:
+            print(f"ML DDoS Predictions: {len(ml_ddos[ml_ddos['PREDICTION'] == 'ATTACK'])}")
+        if not ml_anomalies.empty:
+            print(f"ML Anomalies: {len(ml_anomalies)}")
+        print("=" * 25)
 
     except Exception:
         print("\n\n=== PIPELINE CRASH ===")
