@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Stability v21.0 — ML-Enhanced DDoS & C2 Detection with Adaptive Thresholds
+# Stability v22.0 — ML-Enhanced DDoS & C2 Detection with Priority 3 Protocol Coverage
 # Usage: python3 main.py
 
 import os
@@ -3775,7 +3775,7 @@ def compute_protocol_threats(smb_df, rdp_df, ssh_df, ftp_df, smtp_df, irc_df, p2
 # JS and HTML templates (embedded)
 # -----------------------
 JS_TEMPLATE = r"""
-// === Dashboard JS (Stability v21.0 - ML-Enhanced Detection) ===
+// === Dashboard JS (Stability v22.0 - ML-Enhanced Detection + Protocol Coverage) ===
 if (window.__DASHBOARD_ACTIVE__) { console.warn("Dashboard already active — skipping duplicate init."); }
 else { window.__DASHBOARD_ACTIVE__ = true; }
 
@@ -4181,7 +4181,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 <html>
 <head>
 <meta charset='utf-8'/>
-<title>PCAP Dashboard (Stability v20.4 - Enhanced C2 Detection)</title>
+<title>PCAP Dashboard (Stability v22.0 - Protocol Detection + ML-Enhanced C2/DDoS)</title>
 <link rel='stylesheet' href='https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css'>
 <link rel='stylesheet' href='https://cdn.datatables.net/buttons/2.4.1/css/buttons.dataTables.min.css'>
 <script src='https://code.jquery.com/jquery-3.7.1.min.js'></script>
@@ -4355,7 +4355,7 @@ button:hover {
     <div style='margin-top:12px'><button id='clear_filters' style='padding:8px;border-radius:6px;background:#10b981;color:#fff;border:none;cursor:pointer'>Clear Filters</button></div>
   </aside>
   <main class='content'>
-    <h1 style='margin:0 0 12px 0'>PCAP Analysis Dashboard (Stability v21.0 - ML-Enhanced Detection)</h1>
+    <h1 style='margin:0 0 12px 0'>PCAP Analysis Dashboard (Stability v22.0 - Protocol Detection)</h1>
 
     <div style='margin-bottom:12px'>
       <label>Source IP: <input id='filter_src' type='text'></label>
@@ -4551,7 +4551,7 @@ button:hover {
 # -----------------------
 def pipeline(pcap=FILE_PCAP):
     try:
-        print("\n=== Stability v21.0: ML-Enhanced DDoS & C2 Detection with Adaptive Thresholds ===\n")
+        print("\n=== Stability v22.0: ML-Enhanced DDoS & C2 Detection with Priority 3 Protocol Coverage ===\n")
         
         if ML_AVAILABLE and ML_ENABLED:
             print("[INFO] ML-enhanced detection enabled")
@@ -4774,7 +4774,7 @@ def pipeline(pcap=FILE_PCAP):
             hf.write(html_output)
         print("→ dashboard.html written.")
 
-        print("\n=== DONE: Stability v21.0 dashboard with ML-enhanced detection generated ===\n")
+        print("\n=== DONE: Stability v22.0 dashboard with Protocol Detection generated ===\n")
         
         # Print summary
         print("=== Detection Summary ===")
