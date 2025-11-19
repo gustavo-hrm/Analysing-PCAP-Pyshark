@@ -2949,9 +2949,7 @@ const dnsData       = %%DNS%%;
 const httpData      = %%HTTP%%;
 const tlsData       = %%TLS%%;
 const tcpData       = %%TCP%%;
-const timelineData  = %%TIMELINE%%;
 
-const c2Data        = %%C2GRAPH%%;
 const c2FullData    = %%C2FULL%%;
 
 const advData       = %%ADV%%;
@@ -2960,7 +2958,6 @@ const dnstunnelData = %%DNSTUNNEL%%;
 
 // DDoS Detection Data
 const ddosData      = %%DDOS%%;
-const ddosGraphData = %%DDOSGRAPH%%;
 
 // HTTP C2 Detection Data
 const httpC2Data    = %%HTTPC2%%;
@@ -3077,220 +3074,6 @@ function renderPivot(tbody, data){
 }
 
 
-// Store Cytoscape instances globally
-let c2GraphInstance = null;
-let ddosGraphInstance = null;
-
-// Update renderC2Graph to store instance
-function renderC2Graph(containerId, data){
-  if(typeof cytoscape === 'undefined') return;
-
-  const el = document.getElementById(containerId);
-  if(!el) return;
-
-  const nodes = {};
-  const edges = [];
-  const nodeScores = {};
-
-  data.slice(0,500).forEach((r,i)=>{
-    const s = r.SRC_IP || ('src'+i);
-    const d = r.DST_IP || ('dst'+i);
-    const score = r.SCORE || 0;
-
-    nodes[s] = (nodes[s]||0) + (r.COUNT||1);
-    nodes[d] = (nodes[d]||0) + (r.COUNT||1);
-
-    nodeScores[s] = Math.max(nodeScores[s] || 0, score);
-    nodeScores[d] = Math.max(nodeScores[d] || 0, score);
-
-    edges.push({
-      data:{ id:'e'+i, source:s, target:d, weight:r.COUNT||1, score: score }
-    });
-  });
-
-  const cy_nodes = Object.keys(nodes).map(n=>({
-    data:{ 
-      id:n, 
-      label: n,
-      score: nodeScores[n] || 0,
-      weight:nodes[n]
-    }
-  }));
-
-  const getNodeColor = (score) => {
-    if (score >= 90) return '#dc2626';
-    if (score >= 75) return '#ea580c';
-    if (score >= 60) return '#f59e0b';
-    return '#3b82f6';
-  };
-
-  el.innerHTML = '';
-  
-  // ✅ CRITICAL: Force explicit height on container before Cytoscape initializes
-  // Cytoscape reads container dimensions at initialization time
-  // Setting inline style ensures the height is available immediately
-  el.style.height = '400px';  // ✅ Changed to 400px for side-by-side layout
-  el.style.minHeight = '400px';
-  console.log(`Container ${containerId} forced to 400px height (was ${el.offsetHeight}px)`);
-
-  try{
-    const cy = cytoscape({
-      container: el,
-      elements: {
-        nodes: cy_nodes,
-        edges: edges
-      },
-      style:[
-        {
-          selector:'node',
-          style:{
-            'label': 'data(label)',
-            'text-valign':'center',
-            'text-halign':'center',
-            'font-size': 11,
-            'font-weight': 'bold',
-            'color':'#fff',
-            'text-outline-width': 2.5,
-            'text-outline-color': function(ele){ return getNodeColor(ele.data('score')); },
-            'text-wrap': 'wrap',
-            'text-max-width': 100,
-            'width': function(ele){
-              return Math.max(45, Math.min(80, 45 + ele.data('weight') * 2));
-            },
-            'height': function(ele){
-              return Math.max(45, Math.min(80, 45 + ele.data('weight') * 2));
-            },
-            'background-color': function(ele){ return getNodeColor(ele.data('score')); },
-            'border-width': 3,
-            'border-color': '#fff',
-            'border-opacity': 0.9
-          }
-        },
-        {
-          selector:'edge',
-          style:{
-            'width': function(ele){
-              return Math.max(1.5, Math.min(6, 1.5 + (ele.data('weight') || 0) / 15));
-            },
-            'line-color': function(ele){ 
-              const score = ele.data('score');
-              if (score >= 90) return '#dc2626';
-              if (score >= 75) return '#ea580c';
-              if (score >= 60) return '#f59e0b';
-              return '#94a3b8';
-            },
-            'opacity': 0.7,
-            'curve-style': 'bezier',
-            'target-arrow-shape': 'triangle',
-            'target-arrow-color': function(ele){ 
-              const score = ele.data('score');
-              if (score >= 90) return '#dc2626';
-              if (score >= 75) return '#ea580c';
-              if (score >= 60) return '#f59e0b';
-              return '#94a3b8';
-            },
-            'arrow-scale': 1.5
-          }
-        },
-        {
-          selector:'node:selected',
-          style:{
-            'border-width': 6,
-            'border-color': '#10b981'
-          }
-        }
-      ],
-      layout:{ 
-        name:'cose',
-        animate: true,  // ✅ Enable animation for smooth layout
-        animationDuration: 500,
-        animationEasing: 'ease-out',
-        
-        // ✅ CRITICAL: Better spacing parameters
-        nodeRepulsion: 30000,  // Increased from 25000
-        idealEdgeLength: 200,  // Increased from 180
-        edgeElasticity: 100,
-        
-        // ✅ Prevent top-clustering
-        componentSpacing: 150,  // Increased from 120
-        nestingFactor: 1.2,
-        gravity: 0.1,  // REDUCED from 0.5 to spread vertically even more
-        
-        // ✅ Better convergence
-        numIter: 4000,  // Increased from 3000
-        initialTemp: 1000,
-        coolingFactor: 0.99,
-        minTemp: 1.0,
-        
-        // ✅ Use available space
-        fit: true,  // Auto-fit to container
-        padding: 80,  // Increased from 60 for more edge spacing
-        randomize: false,
-        avoidOverlap: true,  // Prevent node overlap
-        avoidOverlapPadding: 30  // Increased from 25
-      },
-      minZoom: 0.2,
-      maxZoom: 4,
-      wheelSensitivity: 0.15,
-      
-      // ✅ Auto-fit after layout completes
-      ready: function(){
-        this.fit(80);  // Increased padding from 60
-        this.center();
-      }
-    });
-    
-    // ✅ Store instance
-    if(containerId === 'c2graph') {
-      c2GraphInstance = cy;
-    } else if(containerId === 'ddosgraph') {
-      ddosGraphInstance = cy;
-    }
-    
-    // ✅ Force resize to ensure Cytoscape uses full container dimensions
-    cy.resize();
-    
-    // ✅ Re-fit after layout animation completes
-    setTimeout(() => {
-      cy.resize();  // Ensure Cytoscape has correct dimensions
-      cy.fit(80);  // Increased padding from 60
-    }, 600);
-    
-  }catch(e){
-    console.log('cytoscape err', e);
-  }
-}
-
-// ✅ Graph control functions
-function resetC2Graph() {
-  if(c2GraphInstance) {
-    c2GraphInstance.zoom(1);
-    c2GraphInstance.center();
-  }
-}
-
-function fitC2Graph() {
-  if(c2GraphInstance) {
-    c2GraphInstance.fit(null, 50);
-  }
-}
-
-function resetDDoSGraph() {
-  if(ddosGraphInstance) {
-    ddosGraphInstance.zoom(1);
-    ddosGraphInstance.center();
-  }
-}
-
-function fitDDoSGraph() {
-  if(ddosGraphInstance) {
-    ddosGraphInstance.fit(null, 50);
-  }
-}
-
-
-
-
 // ------------------------------------------------------------
 // Dashboard update
 // ------------------------------------------------------------
@@ -3298,13 +3081,13 @@ function updateDashboard(){
 
   const topN = parseInt(document.getElementById('topN').value || '15');
 
-  const fs = (document.getElementById('filter_src')||{value:''}).value.trim();
-  const fd = (document.getElementById('filter_dst')||{value:''}).value.trim();
+  const fs = (document.getElementById('filter_src')||{value:''}).value.trim().toLowerCase();
+  const fd = (document.getElementById('filter_dst')||{value:''}).value.trim().toLowerCase();
   const fm = (document.getElementById('filter_dom')||{value:''}).value.trim().toLowerCase();
 
   const ff = r=>{
-    if(fs && r.SRC_IP && !String(r.SRC_IP).includes(fs)) return false;
-    if(fd && r.DST_IP && !String(r.DST_IP).includes(fd)) return false;
+    if(fs && r.SRC_IP && !String(r.SRC_IP).toLowerCase().includes(fs)) return false;
+    if(fd && r.DST_IP && !String(r.DST_IP).toLowerCase().includes(fd)) return false;
     if(fm){
       const s = Object.values(r).join(' ').toLowerCase();
       if(!s.includes(fm)) return false;
@@ -3312,12 +3095,12 @@ function updateDashboard(){
     return true;
   };
 
-  const dnsSlice  = (dnsData||[]).slice().sort((a,b)=>(b.COUNT||0)-(a.COUNT||0)).slice(0,topN).filter(ff);
-  const httpSlice = (httpData||[]).slice().sort((a,b)=>(b.COUNT||0)-(a.COUNT||0)).slice(0,topN).filter(ff);
-  const tlsSlice  = (tlsData||[]).slice().sort((a,b)=>(b.COUNT||0)-(a.COUNT||0)).slice(0,topN).filter(ff);
+  const dnsSlice  = (dnsData||[]).filter(ff).slice().sort((a,b)=>(b.COUNT||0)-(a.COUNT||0)).slice(0,topN);
+  const httpSlice = (httpData||[]).filter(ff).slice().sort((a,b)=>(b.COUNT||0)-(a.COUNT||0)).slice(0,topN);
+  const tlsSlice  = (tlsData||[]).filter(ff).slice().sort((a,b)=>(b.COUNT||0)-(a.COUNT||0)).slice(0,topN);
 
-  const tcpSliceFiltered = (tcpData||[]).slice().sort((a,b)=>(b.COUNT||0)-(a.COUNT||0)).slice(0,topN).filter(ff);
-  const tcpSliceFull     = (tcpData||[]).slice().sort((a,b)=>(b.COUNT||0)-(a.COUNT||0));
+  const tcpSliceFiltered = (tcpData||[]).filter(ff).slice().sort((a,b)=>(b.COUNT||0)-(a.COUNT||0)).slice(0,topN);
+  const tcpSliceFull     = (tcpData||[]).filter(ff).slice().sort((a,b)=>(b.COUNT||0)-(a.COUNT||0));
 
   // ------------------------
   // TABLES
@@ -3329,38 +3112,38 @@ function updateDashboard(){
 
   renderTableRows(
     document.querySelector('#tbl_c2 tbody'),
-    (c2FullData||[]).slice(0,topN),
+    (c2FullData||[]).filter(ff).slice(0,topN),
     ['INDICATOR','TYPE','SCORE','COUNT']
   );
 
-  renderTableRows(document.querySelector('#tbl_adv tbody'), (advData||[]).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT']);
-  renderTableRows(document.querySelector('#tbl_beacon tbody'), (beaconData||[]).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT']);
-  renderTableRows(document.querySelector('#tbl_dnstunnel tbody'), (dnstunnelData||[]).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT','NOTES']);
+  renderTableRows(document.querySelector('#tbl_adv tbody'), (advData||[]).filter(ff).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT']);
+  renderTableRows(document.querySelector('#tbl_beacon tbody'), (beaconData||[]).filter(ff).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT']);
+  renderTableRows(document.querySelector('#tbl_dnstunnel tbody'), (dnstunnelData||[]).filter(ff).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT','NOTES']);
   
   // DDoS Detection table
-  const ddosSlice = (ddosData||[]).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  const ddosSlice = (ddosData||[]).filter(ff).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
   renderTableRows(document.querySelector('#tbl_ddos tbody'), ddosSlice, ['INDICATOR','TYPE','SCORE','COUNT']);
 
   // HTTP C2 Detection table
-  const httpC2Slice = (httpC2Data||[]).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  const httpC2Slice = (httpC2Data||[]).filter(ff).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
   renderTableRows(document.querySelector('#tbl_http_c2 tbody'), httpC2Slice, 
     ['C2_SERVER','BOT_COUNT','EXTRACTED_IPS','TARGETS_DISTRIBUTED','PAYLOAD_SAMPLE',
      'TARGETS_ATTACKED','CORRELATION_SCORE','TIME_TO_ATTACK','SCORE']);
 
   // ✅ NEW: TCP IP Distribution table
-  const tcpIPSlice = (tcpIPData||[]).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  const tcpIPSlice = (tcpIPData||[]).filter(ff).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
   renderTableRows(document.querySelector('#tbl_tcp_ip tbody'), tcpIPSlice, 
     ['SRC_IP','SRC_PORT','DST_IP','DST_PORT','EXTRACTED_IPS','IPS_FOUND','PAYLOAD_SAMPLE','SCORE']);
 
   // ✅ NEW: ML DDoS Detection table
-  const mlDDoSSlice = (mlDDoSData||[]).slice().sort((a,b)=>(b.ML_SCORE||0)-(a.ML_SCORE||0)).slice(0,topN);
+  const mlDDoSSlice = (mlDDoSData||[]).filter(ff).slice().sort((a,b)=>(b.ML_SCORE||0)-(a.ML_SCORE||0)).slice(0,topN);
   if(document.querySelector('#tbl_ml_ddos tbody')) {
     renderTableRows(document.querySelector('#tbl_ml_ddos tbody'), mlDDoSSlice,
       ['SRC_IP','PROTOCOL','PREDICTION','ML_SCORE','PACKET_RATE','UNIQUE_DST_IPS']);
   }
 
   // ✅ NEW: ML Anomaly Detection table
-  const mlAnomalySlice = (mlAnomalies||[]).slice().sort((a,b)=>(b.ANOMALY_SCORE||0)-(a.ANOMALY_SCORE||0)).slice(0,topN);
+  const mlAnomalySlice = (mlAnomalies||[]).filter(ff).slice().sort((a,b)=>(b.ANOMALY_SCORE||0)-(a.ANOMALY_SCORE||0)).slice(0,topN);
   if(document.querySelector('#tbl_ml_anomalies tbody')) {
     renderTableRows(document.querySelector('#tbl_ml_anomalies tbody'), mlAnomalySlice,
       ['SRC_IP','PROTOCOL','ANOMALY_SCORE','BASELINE_DEVIATION','PACKET_RATE','UNIQUE_DST_IPS']);
@@ -3369,27 +3152,27 @@ function updateDashboard(){
   // Update ML count indicators
   const mlCountEl = document.getElementById('ml_count');
   if(mlCountEl) {
-    const attackCount = (mlDDoSData||[]).filter(x => x.PREDICTION === 'ATTACK').length;
-    mlCountEl.textContent = attackCount + (mlAnomalies||[]).length;
-    mlCountEl.style.color = (attackCount + (mlAnomalies||[]).length) > 0 ? '#dc2626' : '#10b981';
+    const attackCount = (mlDDoSData||[]).filter(ff).filter(x => x.PREDICTION === 'ATTACK').length;
+    mlCountEl.textContent = attackCount + (mlAnomalies||[]).filter(ff).length;
+    mlCountEl.style.color = (attackCount + (mlAnomalies||[]).filter(ff).length) > 0 ? '#dc2626' : '#10b981';
   }
 
   // ✅ PRIORITY 2: Change Point Detection table
-  const cpSlice = (changePointsData||[]).slice(0, topN);
+  const cpSlice = (changePointsData||[]).filter(ff).slice(0, topN);
   if(document.querySelector('#tbl_change_points tbody')) {
     renderTableRows(document.querySelector('#tbl_change_points tbody'), cpSlice,
       ['timestamp','value','deviation','cusum_pos','cusum_neg']);
   }
   
   // ✅ PRIORITY 2: Flow Anomalies table
-  const flowAnomalySlice = (flowAnomaliesData||[]).slice().sort((a,b)=>(b.anomaly_score||0)-(a.anomaly_score||0)).slice(0,topN);
+  const flowAnomalySlice = (flowAnomaliesData||[]).filter(ff).slice().sort((a,b)=>(b.anomaly_score||0)-(a.anomaly_score||0)).slice(0,topN);
   if(document.querySelector('#tbl_flow_anomalies tbody')) {
     renderTableRows(document.querySelector('#tbl_flow_anomalies tbody'), flowAnomalySlice,
       ['flow_id','src_ip','dst_ip','anomaly_score','anomaly_reasons']);
   }
   
   // ✅ PRIORITY 2: Bidirectional Flow table
-  const bidirSlice = (bidirectionalAnomaliesData||[]).slice().sort((a,b)=>(b.asymmetry_score||0)-(a.asymmetry_score||0)).slice(0,topN);
+  const bidirSlice = (bidirectionalAnomaliesData||[]).filter(ff).slice().sort((a,b)=>(b.asymmetry_score||0)-(a.asymmetry_score||0)).slice(0,topN);
   if(document.querySelector('#tbl_bidirectional tbody')) {
     renderTableRows(document.querySelector('#tbl_bidirectional tbody'), bidirSlice,
       ['flow_id','src_ip','dst_ip','asymmetry_score','packet_ratio','byte_ratio','anomaly_type']);
@@ -3400,33 +3183,11 @@ function updateDashboard(){
   // ------------------------
   renderPivot(document.querySelector('#pivot tbody'), tcpSliceFull);
 
-  // ------------------------
-  // C2 GRAPH
-  // ------------------------
-  let edgesForGraph = (c2Data || []).slice();
-
-  if(edgesForGraph.length > 150){
-    console.warn("C2 graph trimmed to 150 edges for readability.");
-    edgesForGraph = edgesForGraph.slice(0,150);
-  }
-
-  renderC2Graph('c2graph', edgesForGraph);
-  
-  // ------------------------
-  // DDoS GRAPH
-  // ------------------------
-  let ddosEdgesForGraph = (ddosGraphData || []).slice();
-  if(ddosEdgesForGraph.length > 150){
-    console.warn("DDoS graph trimmed to 150 edges for readability.");
-    ddosEdgesForGraph = ddosEdgesForGraph.slice(0,150);
-  }
-  renderC2Graph('ddosgraph', ddosEdgesForGraph);
-
   // Update DDoS count indicator
   const ddosCountEl = document.getElementById('ddos_count');
   if(ddosCountEl) {
-    ddosCountEl.textContent = (ddosData||[]).length;
-    ddosCountEl.style.color = (ddosData||[]).length > 0 ? '#dc2626' : '#10b981';
+    ddosCountEl.textContent = (ddosData||[]).filter(ff).length;
+    ddosCountEl.style.color = (ddosData||[]).filter(ff).length > 0 ? '#dc2626' : '#10b981';
   }
 
   // ------------------------
@@ -3448,23 +3209,6 @@ function updateDashboard(){
     tcpSliceFiltered.map(x=>x.COUNT||0),
     'TCP'
   );
-
-  // Timeline
-  try{
-    const ctx = prepareCanvas(document.getElementById('chart_timeline'), 220);
-    if(ctx){
-      window._timeline = new Chart(ctx, {
-        type:'line',
-        data:{
-          labels: timelineData.map(x=>x.label),
-          datasets:[{ label:'HTTP/min', data: timelineData.map(x=>x.count) }]
-        },
-        options:{ responsive:false, animation:false, legend:{ display:false } }
-      });
-    }
-  }catch(e){
-    console.log('timeline err', e);
-  }
   
   // ✅ PRIORITY 2: Change Points Chart
   try{
@@ -3551,7 +3295,6 @@ HTML_TEMPLATE = r"""<!doctype html>
 <script src='https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/pdfmake.min.js'></script>
 <script src='https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/vfs_fonts.js'></script>
 <script src='https://cdn.datatables.net/buttons/2.4.1/js/buttons.html5.min.js'></script>
-<script src='https://unpkg.com/cytoscape@3.24.0/dist/cytoscape.min.js'></script>
 <style>
 :root{--card-h:220px}*{box-sizing:border-box}
 body{margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:#f5f7fa;color:#111;font-size:11px}
@@ -3559,22 +3302,15 @@ body{margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:#f5f7fa;co
 .sidebar{width:240px;background:#0f1724;color:#fff;padding:18px;font-size:11px;flex-shrink:0}
 .content{flex:1;padding:18px;max-width:100%}
 
-/* ✅ NEW: 3-Column Grid Layout */
+/* ✅ 2-Column Grid Layout */
 .card-grid{
   display:grid;
-  grid-template-columns:repeat(3, 1fr);  /* 3 equal columns */
+  grid-template-columns:repeat(2, 1fr);  /* 2 equal columns */
   gap:16px;
   margin-bottom:16px;
 }
 
-/* Responsive: 2 columns on medium screens */
-@media (max-width: 1400px) {
-  .card-grid{
-    grid-template-columns:repeat(2, 1fr);
-  }
-}
-
-/* Responsive: 1 column on small screens */
+/* Responsive: 1 column on smaller screens */
 @media (max-width: 900px) {
   .card-grid{
     grid-template-columns:1fr;
@@ -3640,63 +3376,6 @@ canvas{
   white-space:nowrap;
 }
 
-/* Graph containers - REDUCED SIZE for side-by-side layout */
-#c2graph, #ddosgraph {
-  width: 100%;
-  height: 400px;  /* ✅ Reduced to 400px for side-by-side layout */
-  border: 1px solid #e5e7eb;
-  background: #fafbfc;
-  border-radius: 8px;
-  position: relative;
-  margin-top: 8px;
-  min-height: 400px;
-  max-height: 400px;
-  flex: 0 0 400px;
-}
-
-#c2graph::after, #ddosgraph::after {
-  content: '🔍 Scroll to zoom • Drag to pan';
-  position: absolute;
-  bottom: 10px;
-  right: 10px;
-  font-size: 9px;
-  color: #6b7280;
-  background: rgba(255,255,255,0.95);
-  padding: 5px 12px;
-  border-radius: 6px;
-  pointer-events: none;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-  z-index: 1000;
-}
-
-/* Graph cards for side-by-side layout */
-.card-graph {
-  min-height: 450px;  /* ✅ Accommodate 400px graph + padding + heading */
-}
-
-/* Ensure card content fills available space */
-.card-graph > div {
-  flex: 0 0 auto;
-}
-
-/* Special styling for graph cards */
-.card-graph h3 {
-  margin-bottom: 8px;
-  padding-bottom: 8px;
-  border-bottom: 2px solid #e5e7eb;
-}
-
-body.dark .card-graph h3 {
-  border-bottom-color: #374151;
-}
-
-/* Ensure graphs fill their containers */
-#c2graph canvas,
-#ddosgraph canvas {
-  width: 100% !important;
-  height: 100% !important;
-}
-
 /* Dark mode */
 body.dark { 
   background: #0b1116 !important; 
@@ -3726,16 +3405,6 @@ body.dark .display th {
 body.dark .display td { 
   color:#d1d5db !important; 
   background: transparent !important; 
-}
-
-body.dark #c2graph, body.dark #ddosgraph { 
-  background:#0a0f1a !important; 
-  border-color:#1f2937 !important; 
-}
-
-body.dark #c2graph::after, body.dark #ddosgraph::after {
-  background: rgba(15,23,42,0.95);
-  color: #9ca3af;
 }
 
 /* Input and button styling */
@@ -3800,12 +3469,6 @@ button:hover {
     </div>
 
     <div class='card-grid'>
-  <!-- Row 1: 3 columns -->
-  <div class='card'>
-    <h3>Timeline</h3>
-    <div class='chart-box'><canvas id='chart_timeline'></canvas></div>
-  </div>
-  
   <div class='card'>
     <h3>DNS Top</h3>
     <div class='chart-box'><canvas id='chart_dns'></canvas></div>
@@ -3818,7 +3481,6 @@ button:hover {
     <div class='table-wrap'><table id='tbl_http' class='display'><thead><tr><th>DOMAIN</th><th>COUNT</th><th>%</th></tr></thead><tbody></tbody></table></div>
   </div>
   
-  <!-- Row 2: 3 columns -->
   <div class='card'>
     <h3>TLS SNI / JA3</h3>
     <div class='chart-box'><canvas id='chart_tls'></canvas></div>
@@ -3841,7 +3503,7 @@ button:hover {
   </div>
   
   <!-- ✅ NEW: ML Detection Summary Card -->
-  <div class='card' style='grid-column: span 3;'>
+  <div class='card' style='grid-column: span 2;'>
     <h3>🤖 Machine Learning Detection Summary</h3>
     <div style='display:flex;gap:20px;padding:15px 0;'>
       <div style='flex:1;text-align:center;border-right:1px solid #e5e7eb;'>
@@ -3855,19 +3517,6 @@ button:hover {
         <div>✓ Jitter-Tolerant Beaconing</div>
       </div>
     </div>
-  </div>
-</div>
-
-<!-- Graphs side by side -->
-<div class='card-grid'>
-  <div class='card card-graph'>
-    <h3>C2 Command & Control Graph</h3>
-    <div id='c2graph'></div>
-  </div>
-  
-  <div class='card card-graph'>
-    <h3>DDoS Attack Graph</h3>
-    <div id='ddosgraph'></div>
   </div>
 </div>
 
@@ -4017,73 +3666,31 @@ def pipeline(pcap=FILE_PCAP):
         print("[11/20] Computing full C2 heuristic indicators...")
         c2_full = compute_c2_heuristics(dnsA, httpA, tlsA, tcpA)
 
-        print("[12/20] Preparing compact C2 dataset for graph...")
-        important_prefixes = [
-            "JA3 Match",
-            "High-Entropy TLS SNI",
-            "High-Entropy SNI + Rare JA3",
-            "High-Entropy DNS",
-            "Rare JA3 Fingerprint",
-        ]
-
-        def is_graph_worthy_row(r):
-            if r.get('GRAPH_SKIP', False):
-                return False
-            if not r.get('SRC_IP') and not r.get('DST_IP'):
-                return False
-            t = r.get('TYPE','') or ''
-            if any(t.startswith(p) for p in important_prefixes):
-                return True
-            if int(r.get('SCORE', 0) or 0) >= GRAPH_MIN_SCORE:
-                return True
-            return False
-
-        if not c2_full.empty:
-            c2_graph = c2_full[c2_full.apply(is_graph_worthy_row, axis=1)].copy()
-            if c2_graph.empty:
-                c2_graph = c2_full.sort_values(['SCORE','COUNT'], ascending=[False,False]).head(MAX_GRAPH_EDGES).copy()
-            if len(c2_graph) > MAX_GRAPH_EDGES:
-                c2_graph = c2_graph.head(MAX_GRAPH_EDGES)
-        else:
-            c2_graph = pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT'])
-
-        print(f"  - c2_full rows: {len(c2_full)}")
-        print(f"  - c2_graph rows: {len(c2_graph)}")
-
-        print("[13/20] Computing Advanced Heuristics...")
+        print("[12/20] Computing Advanced Heuristics...")
         adv = compute_advanced_heuristics(dnsA, httpA, tlsA, tcpA, timeline_list)
 
-        print("[14/20] Detecting Beaconing (with jitter tolerance)...")
+        print("[13/20] Detecting Beaconing (with jitter tolerance)...")
         beacon = detect_beaconing(tcp)
         print(f"  - Beacons detected: {len(beacon)}")
 
-        print("[15/20] Detecting DNS Tunneling...")
+        print("[14/20] Detecting DNS Tunneling...")
         dnstunnel = detect_dnstunneling(dns)
         
-        print("[16/20] Detecting HTTP C2 Target Distribution...")
+        print("[15/20] Detecting HTTP C2 Target Distribution...")
         http_c2 = detect_http_target_distribution(http, tcp)
         print(f"  - HTTP C2 detections: {len(http_c2)}")
         
-        print("[17/20] Computing DDoS Attack Heuristics...")
+        print("[16/20] Computing DDoS Attack Heuristics...")
         ddos = compute_ddos_heuristics(tcp, udp, icmp, http, dns_detail, c2_full)
         print(f"  - DDoS detections: {len(ddos)}")
         
-        print("[18/20] Preparing DDoS graph subset...")
-        if not ddos.empty:
-            ddos_graph = ddos[ddos['SCORE'] >= GRAPH_MIN_SCORE].copy()
-            if len(ddos_graph) > MAX_GRAPH_EDGES:
-                ddos_graph = ddos_graph.head(MAX_GRAPH_EDGES)
-        else:
-            ddos_graph = pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','SRC_IP','DST_IP'])
-        print(f"  - ddos_graph rows: {len(ddos_graph)}")
-        
         # ✅ NEW: TCP IP Distribution Detection
-        print("[19/20] Detecting IP lists in TCP payloads (all protocols)...")
+        print("[17/20] Detecting IP lists in TCP payloads (all protocols)...")
         tcp_ip_dist = detect_tcp_ip_distribution(tcp)  # Use RAW tcp, not aggregated
         print(f"  - TCP IP distributions found: {len(tcp_ip_dist)}")
         
         # ✅ PRIORITY 2: Change Point Detection
-        print("[20/26] Detecting traffic change points (CPD)...")
+        print("[18/24] Detecting traffic change points (CPD)...")
         change_points = []
         temporal_patterns = {}
         sliding_windows = pd.DataFrame()
@@ -4122,7 +3729,7 @@ def pipeline(pcap=FILE_PCAP):
             print("  - CPD disabled or insufficient data")
         
         # ✅ PRIORITY 2: Flow-level Statistical Analysis
-        print("[21/26] Performing flow-level analysis...")
+        print("[19/24] Performing flow-level analysis...")
         flow_features = pd.DataFrame()
         flow_anomalies = pd.DataFrame()
         bidirectional_anomalies = pd.DataFrame()
@@ -4146,21 +3753,18 @@ def pipeline(pcap=FILE_PCAP):
         except Exception as e:
             print(f"  - Flow analysis error (non-fatal): {e}")
 
-        print("[22/26] Writing dashboard.js and dashboard.html ...")
+        print("[20/24] Writing dashboard.js and dashboard.html ...")
         js = (
             JS_TEMPLATE
             .replace('%%DNS%%', safe_js_json(dnsA.to_dict(orient='records')))
             .replace('%%HTTP%%', safe_js_json(httpA.to_dict(orient='records')))
             .replace('%%TLS%%', safe_js_json(tlsA.to_dict(orient='records')))
             .replace('%%TCP%%', safe_js_json(tcpA.to_dict(orient='records')))
-            .replace('%%TIMELINE%%', safe_js_json(timeline_list))
-            .replace('%%C2GRAPH%%', safe_js_json(c2_graph.to_dict(orient='records')))
             .replace('%%C2FULL%%', safe_js_json(c2_full.to_dict(orient='records')))
             .replace('%%ADV%%', safe_js_json(adv.to_dict(orient='records')))
             .replace('%%BEACON%%', safe_js_json(beacon.to_dict(orient='records')))
             .replace('%%DNSTUNNEL%%', safe_js_json(dnstunnel.to_dict(orient='records')))
             .replace('%%DDOS%%', safe_js_json(ddos.to_dict(orient='records')))
-            .replace('%%DDOSGRAPH%%', safe_js_json(ddos_graph.to_dict(orient='records')))
             .replace('%%HTTPC2%%', safe_js_json(http_c2.to_dict(orient='records')))
             .replace('%%TCPIP%%', safe_js_json(tcp_ip_dist.to_dict(orient='records')))
             .replace('%%MLDDOS%%', safe_js_json(ml_ddos.to_dict(orient='records') if not ml_ddos.empty else []))
