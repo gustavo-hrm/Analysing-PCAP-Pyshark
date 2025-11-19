@@ -323,8 +323,24 @@ def get_ip_layer(pkt):
     return None, None
 
 def safe_js_json(obj):
+    """
+    Convert object to JSON string safe for embedding in <script> tags.
+    Handles numpy types that are not natively JSON serializable.
+    """
+    class NumpyEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, np.bool_):
+                return bool(obj)
+            elif isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return super(NumpyEncoder, self).default(obj)
+    
     # ensure JSON is safe to embed in <script>
-    return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
+    return json.dumps(obj, cls=NumpyEncoder, ensure_ascii=False).replace("</", "<\\/")
 
 _http_host_re = re.compile(r'(?mi)^Host:\s*([^\r\n]+)')
 # -----------------------
