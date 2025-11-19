@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Stability v22.0 — ML-Enhanced DDoS & C2 Detection with Priority 3 Protocol Coverage
-# Usage: python3 main.py
+# Stability v23.0 — Multi-Source PCAP Correlation with ML-Enhanced Detection
+# Usage: python3 main.py [--sources NAME:PATH ...] [--sources-dir PATTERN]
 
 import os
 import re
@@ -3792,7 +3792,7 @@ def compute_protocol_threats(smb_df, rdp_df, ssh_df, ftp_df, smtp_df, irc_df, p2
 # JS and HTML templates (embedded)
 # -----------------------
 JS_TEMPLATE = r"""
-// === Dashboard JS (Stability v22.0 - ML-Enhanced Detection + Protocol Coverage) ===
+// === Dashboard JS (Stability v23.0 - Multi-Source Correlation + ML-Enhanced Detection) ===
 if (window.__DASHBOARD_ACTIVE__) { console.warn("Dashboard already active — skipping duplicate init."); }
 else { window.__DASHBOARD_ACTIVE__ = true; }
 
@@ -4241,7 +4241,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 <html>
 <head>
 <meta charset='utf-8'/>
-<title>PCAP Dashboard (Stability v22.0 - Protocol Detection + ML-Enhanced C2/DDoS)</title>
+<title>PCAP Dashboard (Stability v23.0 - Multi-Source Correlation + Protocol Detection + ML)</title>
 <link rel='stylesheet' href='https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css'>
 <link rel='stylesheet' href='https://cdn.datatables.net/buttons/2.4.1/css/buttons.dataTables.min.css'>
 <script src='https://code.jquery.com/jquery-3.7.1.min.js'></script>
@@ -4415,7 +4415,7 @@ button:hover {
     <div style='margin-top:12px'><button id='clear_filters' style='padding:8px;border-radius:6px;background:#10b981;color:#fff;border:none;cursor:pointer'>Clear Filters</button></div>
   </aside>
   <main class='content'>
-    <h1 style='margin:0 0 12px 0'>PCAP Analysis Dashboard (Stability v22.0 - Protocol Detection)</h1>
+    <h1 style='margin:0 0 12px 0'>PCAP Analysis Dashboard (Stability v23.0 - Multi-Source Correlation)</h1>
 
     <div style='margin-bottom:12px'>
       <label>Source IP: <input id='filter_src' type='text'></label>
@@ -4880,7 +4880,7 @@ def pipeline(pcap_sources=None):
                      or None to use default FILE_PCAP
     """
     try:
-        print("\n=== Stability v22.0: ML-Enhanced DDoS & C2 Detection with Priority 3 Protocol Coverage ===\n")
+        print("\n=== Stability v23.0: Multi-Source PCAP Correlation with ML-Enhanced Detection ===\n")
         
         # Backward compatibility: handle single file or None
         if isinstance(pcap_sources, str):
@@ -5217,7 +5217,7 @@ def pipeline(pcap_sources=None):
             hf.write(html_output)
         print("→ dashboard.html written.")
 
-        print("\n=== DONE: Stability v22.0 dashboard with Protocol Detection generated ===\n")
+        print("\n=== DONE: Stability v23.0 dashboard with Multi-Source Correlation generated ===\n")
         
         # Print summary
         print("=== Detection Summary ===")

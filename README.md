@@ -3,7 +3,7 @@
 Network traffic analysis tool with ML-enhanced DDoS & C2 detection and comprehensive protocol coverage.
 
 ## Version
-**Stability v22.0** - ML-Enhanced DDoS & C2 Detection with Priority 3 Protocol Coverage
+**Stability v23.0** - Multi-Source PCAP Correlation with ML-Enhanced Detection
 
 ## Features
 
@@ -350,6 +350,19 @@ See CONTRIBUTING.md for development guidelines.
 - Priority 3 enhancement: GitHub Copilot
 
 ## Changelog
+
+### v23.0 (2025-11-19) - Multi-Source PCAP Correlation
+- ✨ **Multi-source analysis**: Analyze 2+ PCAP files simultaneously
+- 🎯 **Shared C2 infrastructure detection**: Same IPs, domains, JA3 fingerprints across sources
+- ⚔️ **Coordinated attack correlation**: DDoS campaigns and botnet activity detection
+- 🔄 **Lateral movement tracking**: Attackers moving between monitored networks
+- 📡 **Beacon synchronization**: Synchronized C2 beacons (shared heartbeat patterns)
+- 📊 **SOURCE_ID tracking**: All packets tagged with source identifier
+- 🎨 **Enhanced dashboard**: 5 new correlation tables with confidence scoring
+- 🧪 **Comprehensive testing**: 8 new multi-source tests + integration tests
+- 📝 **Command-line interface**: `--sources` and `--sources-dir` arguments
+- ♻️ **Backward compatible**: Single-file analysis still works
+- 0 security vulnerabilities (CodeQL verified)
 
 ### v22.0 (2025-11-19) - Priority 3: Expanded Protocol Coverage
 - Added SMB/CIFS lateral movement detection
