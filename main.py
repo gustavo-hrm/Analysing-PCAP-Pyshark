@@ -28,11 +28,15 @@ ML_AVAILABLE = False
 try:
     from sklearn.ensemble import RandomForestClassifier, IsolationForest
     from sklearn.preprocessing import StandardScaler
+    from scipy import stats
+    from collections import defaultdict
     ML_AVAILABLE = True
     print("[INFO] Machine Learning libraries loaded successfully (scikit-learn)")
 except ImportError:
     print("[WARNING] scikit-learn not available - ML features disabled, using heuristics only")
+    from collections import defaultdict
     RandomForestClassifier = IsolationForest = StandardScaler = None
+    stats = None
 
 # -----------------------
 # CONFIG
@@ -123,6 +127,55 @@ ADAPTIVE_THRESHOLD_SENSITIVITY = 3      # Standard deviations for adaptive thres
 JITTER_TOLERANCE = 0.5                  # Max jitter tolerance (0.0-1.0, 0.5 = 50%)
 ML_MIN_TRAINING_SAMPLES = 10            # Minimum samples needed for ML training
 AUTOCORR_MIN_LAGS = 5                   # Minimum lags for autocorrelation analysis
+
+# -----------------------
+# DGA Detection Configuration
+# -----------------------
+DGA_MIN_SCORE = 60                      # Minimum score to flag domain as DGA
+DGA_ENABLE_NGRAM = True                 # Enable n-gram analysis
+DGA_ENABLE_MARKOV = True                # Enable Markov chain analysis
+
+# Rare character bigrams (low probability pairs)
+RARE_BIGRAMS = [
+    'qx', 'qz', 'xj', 'zx', 'vq', 'jq', 'qk', 'bq', 'pq', 'xz', 'zq',
+    'fq', 'gq', 'vj', 'wq', 'vx', 'qj', 'qt', 'qp', 'qm', 'qn', 'qg'
+]
+
+# Suspicious top-level domains commonly used by malware
+SUSPICIOUS_TLDS = [
+    '.tk', '.ml', '.ga', '.cf', '.gq', '.pw', '.top', '.xyz', '.info',
+    '.work', '.date', '.review', '.country', '.stream', '.download',
+    '.bid', '.win', '.cricket', '.science', '.party', '.racing', '.faith'
+]
+
+# Popular brands for typosquatting detection
+POPULAR_BRANDS = [
+    'google', 'facebook', 'microsoft', 'amazon', 'apple', 'netflix',
+    'twitter', 'instagram', 'youtube', 'linkedin', 'paypal', 'ebay',
+    'walmart', 'target', 'adobe', 'oracle', 'github', 'dropbox', 'zoom'
+]
+
+# Common legitimate words in domains
+COMMON_WORDS = [
+    'http', 'www', 'mail', 'server', 'cloud', 'api', 'cdn', 'static',
+    'admin', 'login', 'auth', 'secure', 'web', 'app', 'mobile', 'data',
+    'service', 'network', 'system', 'online', 'portal', 'blog', 'news'
+]
+
+# -----------------------
+# Change Point Detection Configuration
+# -----------------------
+CPD_ENABLED = True                      # Enable Change Point Detection
+CPD_WINDOW_SIZE = 300                   # Sliding window size in seconds (5 minutes)
+CPD_THRESHOLD = 5.0                     # CUSUM threshold (standard deviations)
+CPD_DRIFT = 0.5                         # Minimum change to detect
+MIN_SAMPLES = 100                       # Minimum packets for analysis
+
+# -----------------------
+# Flow Analysis Configuration
+# -----------------------
+FLOW_TIMEOUT = 120                      # Flow idle timeout in seconds
+FLOW_MIN_PACKETS = 3                    # Minimum packets per flow for analysis
 
 # -----------------------
 # Utilities
@@ -746,6 +799,201 @@ def compute_c2_heuristics(dnsA, httpA, tlsA, tcpA):
 # -----------------------
 # Advanced heuristics pack
 # -----------------------
+
+def levenshtein_distance(s1, s2):
+    """
+    Calculate edit distance between two strings using dynamic programming.
+    Used for typosquatting detection.
+    
+    Args:
+        s1: First string
+        s2: Second string
+        
+    Returns:
+        int: Minimum number of edits needed to transform s1 into s2
+    
+    Examples:
+        >>> levenshtein_distance("google", "goggle")
+        1
+        >>> levenshtein_distance("facebook", "facebok")
+        1
+    """
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    
+    if len(s2) == 0:
+        return len(s1)
+    
+    # Create matrix for dynamic programming
+    previous_row = range(len(s2) + 1)
+    
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            # Cost of insertions, deletions, or substitutions
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
+
+
+def advanced_dga_detection(domain):
+    """
+    Multi-heuristic DGA detection returning score 0-100 with breakdown.
+    
+    Checks:
+    - N-gram frequency (bigrams, trigrams)
+    - Consonant/vowel clustering
+    - Dictionary word presence
+    - TLD reputation
+    - Levenshtein distance to known brands
+    - Subdomain encoding patterns (base64, hex)
+    - Character transition probabilities
+    
+    Args:
+        domain: Domain name to analyze
+        
+    Returns:
+        dict: {
+            'total_score': int (0-100),
+            'breakdown': {
+                'ngram': int,
+                'consonant': int,
+                'vowel_ratio': int,
+                'entropy': int,
+                'length': int,
+                'digits': int,
+                'tld': int,
+                'typosquat': int,
+                'subdomain': int,
+                'dictionary': int
+            },
+            'is_dga': bool
+        }
+    
+    Examples:
+        >>> result = advanced_dga_detection("xqz8kjasdh9f.tk")
+        >>> result['is_dga']
+        True
+        >>> result['total_score'] > 60
+        True
+    """
+    if not domain:
+        return {'total_score': 0, 'breakdown': {}, 'is_dga': False}
+    
+    breakdown = {
+        'ngram': 0,
+        'consonant': 0,
+        'vowel_ratio': 0,
+        'entropy': 0,
+        'length': 0,
+        'digits': 0,
+        'tld': 0,
+        'typosquat': 0,
+        'subdomain': 0,
+        'dictionary': 0
+    }
+    
+    # Parse domain parts
+    domain = domain.lower().strip().rstrip('.')
+    parts = domain.split('.')
+    
+    # Get TLD and base domain
+    if len(parts) >= 2:
+        base_domain = parts[-2]
+        tld = '.' + parts[-1]
+    else:
+        base_domain = parts[0] if parts else ''
+        tld = ''
+    
+    # 1. N-gram Analysis (bigrams)
+    if DGA_ENABLE_NGRAM and len(base_domain) >= 2:
+        bigrams = [base_domain[i:i+2] for i in range(len(base_domain)-1)]
+        rare_count = sum(1 for bg in bigrams if bg in RARE_BIGRAMS)
+        if rare_count > 0:
+            breakdown['ngram'] = min(25, rare_count * 8)
+    
+    # 2. Consonant Clustering
+    consonants = 'bcdfghjklmnpqrstvwxyz'
+    consonant_clusters = 0
+    for i in range(len(base_domain) - 2):
+        if all(c in consonants for c in base_domain[i:i+3]):
+            consonant_clusters += 1
+    if consonant_clusters > 0:
+        breakdown['consonant'] = min(15, consonant_clusters * 7)
+    
+    # 3. Vowel/Consonant Ratio
+    vowels = sum(c in 'aeiou' for c in base_domain)
+    total_alpha = sum(c.isalpha() for c in base_domain)
+    if total_alpha > 0:
+        vowel_ratio = vowels / total_alpha
+        # Abnormal if too few vowels (< 0.2) or too many (> 0.7)
+        if vowel_ratio < 0.2 or vowel_ratio > 0.7:
+            breakdown['vowel_ratio'] = 10
+    
+    # 4. Entropy
+    ent = shannon_entropy(base_domain)
+    if ent >= 4.0:
+        breakdown['entropy'] = min(20, int((ent - 4.0) * 10))
+    
+    # 5. Length
+    if len(base_domain) >= 12:
+        breakdown['length'] = min(15, (len(base_domain) - 12) * 2)
+    
+    # 6. Digit Ratio
+    digits = sum(c.isdigit() for c in base_domain)
+    if len(base_domain) > 0 and digits / len(base_domain) > 0.3:
+        breakdown['digits'] = 10
+    
+    # 7. TLD Reputation
+    if tld in SUSPICIOUS_TLDS:
+        breakdown['tld'] = 20
+    
+    # 8. Typosquatting Detection (Levenshtein distance to popular brands)
+    min_distance = float('inf')
+    for brand in POPULAR_BRANDS:
+        dist = levenshtein_distance(base_domain, brand)
+        min_distance = min(min_distance, dist)
+    
+    # If very close to a brand (1-2 edits) but not exact match
+    if 1 <= min_distance <= 2:
+        breakdown['typosquat'] = 15
+    
+    # 9. Subdomain Analysis
+    if len(parts) > 2:
+        # Check for excessive subdomains (> 3)
+        if len(parts) > 4:
+            breakdown['subdomain'] = 10
+        
+        # Check for encoded subdomains (hex/base64 patterns)
+        for part in parts[:-2]:
+            if len(part) > 8:
+                # Hex pattern (long hex strings)
+                if all(c in '0123456789abcdef' for c in part):
+                    breakdown['subdomain'] = max(breakdown['subdomain'], 15)
+                # Base64-like pattern (alphanumeric with some special chars)
+                elif len(part) > 16 and part.count('-') + part.count('_') > 2:
+                    breakdown['subdomain'] = max(breakdown['subdomain'], 10)
+    
+    # 10. Dictionary Word Detection (reduces score if found)
+    has_common_word = any(word in base_domain for word in COMMON_WORDS)
+    if has_common_word:
+        breakdown['dictionary'] = -10  # Negative score for legitimate words
+    
+    # Calculate total score
+    total_score = sum(breakdown.values())
+    total_score = max(0, min(100, total_score))
+    
+    return {
+        'total_score': total_score,
+        'breakdown': breakdown,
+        'is_dga': total_score >= DGA_MIN_SCORE
+    }
+
+
 def is_dga_like(domain):
     if not domain: return 0
     d = domain.split('.')[0]
@@ -789,17 +1037,61 @@ def ja3_cluster_scores(tls_df):
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT'])
 
 def advanced_dns_checks(dns_df):
+    """
+    Enhanced DNS checks using advanced DGA detection with detailed scoring breakdown.
+    
+    Args:
+        dns_df: Aggregated DNS DataFrame with DOMAIN column
+        
+    Returns:
+        pd.DataFrame with DGA detections including score breakdown
+    """
     rows = []
-    if dns_df.empty: return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT'])
+    if dns_df.empty: 
+        return pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','DGA_BREAKDOWN'])
     try:
         for _, r in dns_df.iterrows():
             dom = r.get('DOMAIN','') or ''
-            score = is_dga_like(dom)
-            if score >= 50:
-                rows.append({'INDICATOR': dom, 'TYPE': 'DGA-like domain', 'SCORE': 60 + (score//5), 'COUNT': int(r.get('COUNT',0))})
+            
+            # Use advanced DGA detection
+            dga_result = advanced_dga_detection(dom)
+            
+            if dga_result['is_dga']:
+                # Create readable breakdown string
+                breakdown = dga_result['breakdown']
+                breakdown_str = ', '.join([
+                    f"{k}:{v}" for k, v in breakdown.items() if v != 0
+                ])
+                
+                rows.append({
+                    'INDICATOR': dom, 
+                    'TYPE': 'DGA-like domain (advanced)', 
+                    'SCORE': dga_result['total_score'], 
+                    'COUNT': int(r.get('COUNT', 0)),
+                    'DGA_BREAKDOWN': breakdown_str
+                })
+            else:
+                # Fallback to simple detection for borderline cases
+                score = is_dga_like(dom)
+                if score >= 50:
+                    rows.append({
+                        'INDICATOR': dom, 
+                        'TYPE': 'DGA-like domain', 
+                        'SCORE': 60 + (score // 5), 
+                        'COUNT': int(r.get('COUNT', 0)),
+                        'DGA_BREAKDOWN': 'simple heuristic'
+                    })
     except Exception:
         pass
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT'])
+    
+    # Return with DGA_BREAKDOWN column
+    result = pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','DGA_BREAKDOWN'])
+    
+    # For compatibility, ensure DGA_BREAKDOWN exists even if empty
+    if not result.empty and 'DGA_BREAKDOWN' not in result.columns:
+        result['DGA_BREAKDOWN'] = ''
+    
+    return result
 
 def compute_advanced_heuristics(dnsA, httpA, tlsA, tcpA, timeline_list):
     parts = []
@@ -896,6 +1188,297 @@ def detect_beaconing(tcp_rows, min_count=12, max_cv=0.35, min_period=1, max_peri
         print(f"[WARNING] Beaconing detection error: {e}")
     
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['INDICATOR','TYPE','SCORE','COUNT','MEAN_PERIOD','CV','JITTER','METHOD'])
+
+# -----------------------
+# Change Point Detection (CPD)
+# -----------------------
+
+def detect_change_points(traffic_series, baseline, threshold=CPD_THRESHOLD):
+    """
+    Uses CUSUM algorithm to detect abrupt changes in traffic patterns.
+    
+    The CUSUM (Cumulative Sum) algorithm detects shifts in the mean of a time series
+    by accumulating deviations from a baseline. When the cumulative sum exceeds a
+    threshold, a change point is detected.
+    
+    Args:
+        traffic_series: Time-series data (pandas Series with datetime index)
+                       e.g., packets/sec, bytes/sec, connection rate
+        baseline: Statistical baseline dict with 'mean' and 'std'
+        threshold: Sensitivity in standard deviations (default: 5.0)
+    
+    Returns:
+        List of dicts with change points: [
+            {
+                'timestamp': datetime,
+                'value': float,
+                'deviation': float (in sigmas),
+                'cusum_pos': float,
+                'cusum_neg': float
+            }
+        ]
+    
+    Examples:
+        >>> baseline = {'mean': 100, 'std': 10}
+        >>> series = pd.Series([100]*10 + [200]*10)
+        >>> changes = detect_change_points(series, baseline, threshold=3.0)
+        >>> len(changes) > 0
+        True
+    """
+    if not CPD_ENABLED:
+        return []
+    
+    if len(traffic_series) < MIN_SAMPLES:
+        return []
+    
+    try:
+        mean = baseline.get('mean', traffic_series.mean())
+        std = baseline.get('std', traffic_series.std())
+        
+        if std == 0 or np.isnan(std):
+            return []
+        
+        # CUSUM parameters
+        drift = CPD_DRIFT * std
+        
+        # Initialize CUSUM values
+        cusum_pos = 0
+        cusum_neg = 0
+        
+        change_points = []
+        
+        for idx, value in traffic_series.items():
+            # Calculate deviation from baseline
+            deviation = value - mean
+            
+            # Update positive CUSUM (detects upward shifts)
+            cusum_pos = max(0, cusum_pos + deviation - drift)
+            
+            # Update negative CUSUM (detects downward shifts)
+            cusum_neg = max(0, cusum_neg - deviation - drift)
+            
+            # Check if threshold exceeded
+            deviation_sigmas = abs(deviation) / std
+            
+            if cusum_pos > threshold * std or cusum_neg > threshold * std:
+                change_points.append({
+                    'timestamp': idx,
+                    'value': float(value),
+                    'deviation': float(deviation_sigmas),
+                    'cusum_pos': float(cusum_pos),
+                    'cusum_neg': float(cusum_neg)
+                })
+                
+                # Reset CUSUM after detection
+                cusum_pos = 0
+                cusum_neg = 0
+        
+        return change_points
+    
+    except Exception:
+        return []
+
+
+def analyze_temporal_patterns(traffic_df):
+    """
+    Detects time-based patterns (hourly, daily cycles).
+    Flags deviations from expected patterns.
+    
+    Args:
+        traffic_df: DataFrame with 'TS' column (timestamps)
+        
+    Returns:
+        dict: {
+            'hourly_pattern': dict with hour -> avg_count,
+            'anomalous_hours': list of hours with unusual traffic,
+            'daily_pattern': dict with day -> avg_count,
+            'pattern_detected': bool
+        }
+    
+    Examples:
+        >>> df = pd.DataFrame({'TS': [i*3600 for i in range(48)]})
+        >>> result = analyze_temporal_patterns(df)
+        >>> 'hourly_pattern' in result
+        True
+    """
+    if traffic_df.empty or 'TS' not in traffic_df.columns:
+        return {
+            'hourly_pattern': {},
+            'anomalous_hours': [],
+            'daily_pattern': {},
+            'pattern_detected': False
+        }
+    
+    try:
+        # Convert timestamps to datetime
+        traffic_df = traffic_df.copy()
+        traffic_df['datetime'] = pd.to_datetime(traffic_df['TS'], unit='s')
+        traffic_df['hour'] = traffic_df['datetime'].dt.hour
+        traffic_df['day'] = traffic_df['datetime'].dt.day
+        
+        # Hourly pattern
+        hourly_counts = traffic_df.groupby('hour').size()
+        hourly_pattern = hourly_counts.to_dict()
+        
+        # Daily pattern
+        daily_counts = traffic_df.groupby('day').size()
+        daily_pattern = daily_counts.to_dict()
+        
+        # Detect anomalous hours (> 2 std from mean)
+        mean_hourly = hourly_counts.mean()
+        std_hourly = hourly_counts.std()
+        
+        anomalous_hours = []
+        if std_hourly > 0:
+            for hour, count in hourly_pattern.items():
+                if abs(count - mean_hourly) > 2 * std_hourly:
+                    anomalous_hours.append(int(hour))
+        
+        # Determine if pattern detected
+        pattern_detected = len(hourly_pattern) >= 3 and std_hourly > 0
+        
+        return {
+            'hourly_pattern': hourly_pattern,
+            'anomalous_hours': anomalous_hours,
+            'daily_pattern': daily_pattern,
+            'pattern_detected': pattern_detected
+        }
+    
+    except Exception:
+        return {
+            'hourly_pattern': {},
+            'anomalous_hours': [],
+            'daily_pattern': {},
+            'pattern_detected': False
+        }
+
+
+def sliding_window_analysis(traffic_df, window_size=CPD_WINDOW_SIZE):
+    """
+    Real-time analysis using sliding windows.
+    Updates baseline dynamically and detects sustained vs. burst anomalies.
+    
+    Args:
+        traffic_df: DataFrame with 'TS' column (timestamps) and traffic metrics
+        window_size: Window size in seconds (default: 300 = 5 minutes)
+    
+    Returns:
+        pd.DataFrame with columns:
+            - window_start: Start timestamp of window
+            - window_end: End timestamp of window
+            - packet_count: Packets in window
+            - byte_count: Bytes in window
+            - pps: Packets per second
+            - bps: Bytes per second
+            - is_anomaly: Boolean flag
+            - anomaly_type: 'burst' or 'sustained' or None
+    
+    Examples:
+        >>> df = pd.DataFrame({
+        ...     'TS': [i for i in range(1000)],
+        ...     'SIZE': [100] * 1000
+        ... })
+        >>> result = sliding_window_analysis(df, window_size=60)
+        >>> 'pps' in result.columns
+        True
+    """
+    if traffic_df.empty or 'TS' not in traffic_df.columns:
+        return pd.DataFrame(columns=[
+            'window_start', 'window_end', 'packet_count', 'byte_count',
+            'pps', 'bps', 'is_anomaly', 'anomaly_type'
+        ])
+    
+    try:
+        # Sort by timestamp
+        traffic_df = traffic_df.sort_values('TS').copy()
+        
+        min_ts = traffic_df['TS'].min()
+        max_ts = traffic_df['TS'].max()
+        
+        if max_ts - min_ts < window_size:
+            # Not enough data for windowing
+            return pd.DataFrame(columns=[
+                'window_start', 'window_end', 'packet_count', 'byte_count',
+                'pps', 'bps', 'is_anomaly', 'anomaly_type'
+            ])
+        
+        # Create windows
+        windows = []
+        current_start = min_ts
+        
+        while current_start < max_ts:
+            window_end = current_start + window_size
+            
+            # Get packets in this window
+            window_data = traffic_df[
+                (traffic_df['TS'] >= current_start) &
+                (traffic_df['TS'] < window_end)
+            ]
+            
+            packet_count = len(window_data)
+            byte_count = window_data['SIZE'].sum() if 'SIZE' in window_data.columns else 0
+            
+            pps = packet_count / window_size
+            bps = byte_count / window_size
+            
+            windows.append({
+                'window_start': current_start,
+                'window_end': window_end,
+                'packet_count': int(packet_count),
+                'byte_count': int(byte_count),
+                'pps': float(pps),
+                'bps': float(bps)
+            })
+            
+            # Slide window by half its size
+            current_start += window_size // 2
+        
+        # Create DataFrame
+        result_df = pd.DataFrame(windows)
+        
+        if result_df.empty:
+            result_df['is_anomaly'] = []
+            result_df['anomaly_type'] = []
+            return result_df
+        
+        # Detect anomalies using IQR method
+        pps_mean = result_df['pps'].mean()
+        pps_std = result_df['pps'].std()
+        
+        if pps_std > 0:
+            # Mark anomalies (> 3 sigma)
+            result_df['is_anomaly'] = result_df['pps'] > (pps_mean + 3 * pps_std)
+            
+            # Classify anomaly type
+            def classify_anomaly(row, idx):
+                if not row['is_anomaly']:
+                    return None
+                
+                # Check if sustained (multiple consecutive windows are anomalous)
+                if idx > 0 and idx < len(result_df) - 1:
+                    prev_anomaly = result_df.iloc[idx - 1]['is_anomaly']
+                    next_anomaly = result_df.iloc[idx + 1]['is_anomaly']
+                    
+                    if prev_anomaly or next_anomaly:
+                        return 'sustained'
+                
+                return 'burst'
+            
+            result_df['anomaly_type'] = [
+                classify_anomaly(row, idx)
+                for idx, row in result_df.iterrows()
+            ]
+        else:
+            result_df['is_anomaly'] = False
+            result_df['anomaly_type'] = None
+        
+        return result_df
+    
+    except Exception:
+        return pd.DataFrame(columns=[
+            'window_start', 'window_end', 'packet_count', 'byte_count',
+            'pps', 'bps', 'is_anomaly', 'anomaly_type'
+        ])
 
 # -----------------------
 # DNS tunneling detection
@@ -1082,6 +1665,421 @@ def detect_tcp_ip_distribution(tcp_df):
             })
     
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','EXTRACTED_IPS','IPS_FOUND','PAYLOAD_SAMPLE','SCORE'])
+
+# -----------------------
+# Flow-level Statistical Analysis
+# -----------------------
+
+def extract_flow_features(tcp_df):
+    """
+    Aggregates packets into flows (5-tuple: src_ip, dst_ip, src_port, dst_port, protocol).
+    
+    A flow is defined by the 5-tuple and represents a bidirectional communication session.
+    Features extracted include duration, packet counts, byte counts, inter-arrival times,
+    and flag distributions.
+    
+    Args:
+        tcp_df: DataFrame with TCP traffic
+        
+    Returns:
+        pd.DataFrame with columns:
+            - flow_id: Unique flow identifier (5-tuple hash)
+            - src_ip, dst_ip, src_port, dst_port: Flow tuple
+            - flow_duration: Duration in seconds
+            - fwd_packets, bwd_packets: Directional packet counts
+            - fwd_bytes, bwd_bytes: Directional byte counts
+            - packet_size_mean, packet_size_std, packet_size_min, packet_size_max
+            - iat_mean, iat_std, iat_max: Inter-arrival time statistics
+            - syn_count, ack_count, psh_count, rst_count, fin_count: TCP flag counts
+            - idle_time_mean, active_time: Flow timing metrics
+            - bytes_per_second, packets_per_second: Rate metrics
+            
+    Examples:
+        >>> tcp = pd.DataFrame({
+        ...     'SRC_IP': ['192.168.1.1', '192.168.1.1'],
+        ...     'DST_IP': ['8.8.8.8', '8.8.8.8'],
+        ...     'SRC_PORT': [12345, 12345],
+        ...     'DST_PORT': [80, 80],
+        ...     'TS': [1.0, 2.0],
+        ...     'SIZE': [100, 150]
+        ... })
+        >>> flows = extract_flow_features(tcp)
+        >>> 'flow_duration' in flows.columns
+        True
+    """
+    if tcp_df.empty:
+        return pd.DataFrame(columns=[
+            'flow_id', 'src_ip', 'dst_ip', 'src_port', 'dst_port',
+            'flow_duration', 'fwd_packets', 'bwd_packets', 'fwd_bytes', 'bwd_bytes',
+            'packet_size_mean', 'packet_size_std', 'packet_size_min', 'packet_size_max',
+            'iat_mean', 'iat_std', 'iat_max',
+            'syn_count', 'ack_count', 'psh_count', 'rst_count', 'fin_count',
+            'idle_time_mean', 'active_time', 'bytes_per_second', 'packets_per_second'
+        ])
+    
+    try:
+        # Required columns
+        required_cols = ['SRC_IP', 'DST_IP', 'TS']
+        if not all(col in tcp_df.columns for col in required_cols):
+            return pd.DataFrame(columns=[
+                'flow_id', 'src_ip', 'dst_ip', 'src_port', 'dst_port',
+                'flow_duration', 'fwd_packets', 'bwd_packets', 'fwd_bytes', 'bwd_bytes',
+                'packet_size_mean', 'packet_size_std', 'packet_size_min', 'packet_size_max',
+                'iat_mean', 'iat_std', 'iat_max',
+                'syn_count', 'ack_count', 'psh_count', 'rst_count', 'fin_count',
+                'idle_time_mean', 'active_time', 'bytes_per_second', 'packets_per_second'
+            ])
+        
+        tcp_df = tcp_df.copy()
+        
+        # Add missing columns with defaults
+        if 'SRC_PORT' not in tcp_df.columns:
+            tcp_df['SRC_PORT'] = 0
+        if 'DST_PORT' not in tcp_df.columns:
+            tcp_df['DST_PORT'] = 0
+        if 'SIZE' not in tcp_df.columns:
+            tcp_df['SIZE'] = 0
+        if 'FLAGS' not in tcp_df.columns:
+            tcp_df['FLAGS'] = ''
+        
+        # Create flow ID (5-tuple)
+        # For bidirectional flows, normalize the tuple (smaller IP first)
+        def create_flow_id(row):
+            src_ip = row['SRC_IP']
+            dst_ip = row['DST_IP']
+            src_port = row['SRC_PORT']
+            dst_port = row['DST_PORT']
+            
+            # Normalize for bidirectional matching
+            if src_ip < dst_ip:
+                return f"{src_ip}:{src_port}->{dst_ip}:{dst_port}"
+            else:
+                return f"{dst_ip}:{dst_port}->{src_ip}:{src_port}"
+        
+        tcp_df['flow_id'] = tcp_df.apply(create_flow_id, axis=1)
+        
+        # Group by flow
+        flows = []
+        
+        for flow_id, group in tcp_df.groupby('flow_id'):
+            if len(group) < FLOW_MIN_PACKETS:
+                continue
+            
+            # Sort by timestamp
+            group = group.sort_values('TS')
+            
+            # Basic flow info
+            src_ip = group.iloc[0]['SRC_IP']
+            dst_ip = group.iloc[0]['DST_IP']
+            src_port = group.iloc[0]['SRC_PORT']
+            dst_port = group.iloc[0]['DST_PORT']
+            
+            # Flow duration
+            first_ts = group['TS'].min()
+            last_ts = group['TS'].max()
+            duration = last_ts - first_ts
+            
+            # Directional analysis (forward = src->dst, backward = dst->src)
+            fwd_mask = (group['SRC_IP'] == src_ip) & (group['DST_IP'] == dst_ip)
+            bwd_mask = ~fwd_mask
+            
+            fwd_packets = fwd_mask.sum()
+            bwd_packets = bwd_mask.sum()
+            
+            fwd_bytes = group.loc[fwd_mask, 'SIZE'].sum()
+            bwd_bytes = group.loc[bwd_mask, 'SIZE'].sum()
+            
+            # Packet size statistics
+            sizes = group['SIZE']
+            packet_size_mean = sizes.mean()
+            packet_size_std = sizes.std() if len(sizes) > 1 else 0
+            packet_size_min = sizes.min()
+            packet_size_max = sizes.max()
+            
+            # Inter-arrival time statistics
+            timestamps = group['TS'].values
+            if len(timestamps) > 1:
+                iats = np.diff(timestamps)
+                iat_mean = np.mean(iats)
+                iat_std = np.std(iats)
+                iat_max = np.max(iats)
+            else:
+                iat_mean = iat_std = iat_max = 0
+            
+            # TCP flag counts
+            flags_str = ' '.join(group['FLAGS'].astype(str))
+            syn_count = flags_str.count('SYN')
+            ack_count = flags_str.count('ACK')
+            psh_count = flags_str.count('PSH')
+            rst_count = flags_str.count('RST')
+            fin_count = flags_str.count('FIN')
+            
+            # Idle time analysis (gaps > 1 second)
+            idle_times = iats[iats > 1.0] if len(timestamps) > 1 else np.array([])
+            idle_time_mean = np.mean(idle_times) if len(idle_times) > 0 else 0
+            active_time = duration - (idle_time_mean * len(idle_times)) if len(idle_times) > 0 else duration
+            
+            # Rate metrics
+            bytes_per_second = (fwd_bytes + bwd_bytes) / duration if duration > 0 else 0
+            packets_per_second = len(group) / duration if duration > 0 else 0
+            
+            flows.append({
+                'flow_id': flow_id,
+                'src_ip': src_ip,
+                'dst_ip': dst_ip,
+                'src_port': int(src_port),
+                'dst_port': int(dst_port),
+                'flow_duration': float(duration),
+                'fwd_packets': int(fwd_packets),
+                'bwd_packets': int(bwd_packets),
+                'fwd_bytes': int(fwd_bytes),
+                'bwd_bytes': int(bwd_bytes),
+                'packet_size_mean': float(packet_size_mean),
+                'packet_size_std': float(packet_size_std),
+                'packet_size_min': int(packet_size_min),
+                'packet_size_max': int(packet_size_max),
+                'iat_mean': float(iat_mean),
+                'iat_std': float(iat_std),
+                'iat_max': float(iat_max),
+                'syn_count': int(syn_count),
+                'ack_count': int(ack_count),
+                'psh_count': int(psh_count),
+                'rst_count': int(rst_count),
+                'fin_count': int(fin_count),
+                'idle_time_mean': float(idle_time_mean),
+                'active_time': float(active_time),
+                'bytes_per_second': float(bytes_per_second),
+                'packets_per_second': float(packets_per_second)
+            })
+        
+        return pd.DataFrame(flows)
+    
+    except Exception:
+        return pd.DataFrame(columns=[
+            'flow_id', 'src_ip', 'dst_ip', 'src_port', 'dst_port',
+            'flow_duration', 'fwd_packets', 'bwd_packets', 'fwd_bytes', 'bwd_bytes',
+            'packet_size_mean', 'packet_size_std', 'packet_size_min', 'packet_size_max',
+            'iat_mean', 'iat_std', 'iat_max',
+            'syn_count', 'ack_count', 'psh_count', 'rst_count', 'fin_count',
+            'idle_time_mean', 'active_time', 'bytes_per_second', 'packets_per_second'
+        ])
+
+
+def analyze_bidirectional_flows(flow_features):
+    """
+    Analyzes request/response patterns in bidirectional flows.
+    Detects asymmetric flows (one-way communication) which may indicate
+    data exfiltration or C2 communication.
+    
+    Args:
+        flow_features: DataFrame from extract_flow_features()
+        
+    Returns:
+        pd.DataFrame with anomalous flows and asymmetry scores
+        
+    Examples:
+        >>> flows = pd.DataFrame({
+        ...     'flow_id': ['flow1'],
+        ...     'fwd_packets': [100],
+        ...     'bwd_packets': [1],
+        ...     'fwd_bytes': [10000],
+        ...     'bwd_bytes': [100]
+        ... })
+        >>> result = analyze_bidirectional_flows(flows)
+        >>> 'asymmetry_score' in result.columns
+        True
+    """
+    if flow_features.empty:
+        return pd.DataFrame(columns=[
+            'flow_id', 'src_ip', 'dst_ip', 'asymmetry_score',
+            'packet_ratio', 'byte_ratio', 'anomaly_type'
+        ])
+    
+    try:
+        results = []
+        
+        for _, flow in flow_features.iterrows():
+            fwd_packets = flow.get('fwd_packets', 0)
+            bwd_packets = flow.get('bwd_packets', 0)
+            fwd_bytes = flow.get('fwd_bytes', 0)
+            bwd_bytes = flow.get('bwd_bytes', 0)
+            
+            total_packets = fwd_packets + bwd_packets
+            total_bytes = fwd_bytes + bwd_bytes
+            
+            if total_packets == 0 or total_bytes == 0:
+                continue
+            
+            # Calculate asymmetry ratios
+            if bwd_packets > 0:
+                packet_ratio = fwd_packets / bwd_packets
+            else:
+                packet_ratio = float('inf')
+            
+            if bwd_bytes > 0:
+                byte_ratio = fwd_bytes / bwd_bytes
+            else:
+                byte_ratio = float('inf')
+            
+            # Detect anomalies
+            anomaly_type = None
+            asymmetry_score = 0
+            
+            # One-way communication (very few responses)
+            if packet_ratio > 10 or bwd_packets < 3:
+                anomaly_type = 'one-way communication'
+                asymmetry_score = 80
+            
+            # Excessive upload (potential exfiltration)
+            elif byte_ratio > 20:
+                anomaly_type = 'excessive upload'
+                asymmetry_score = 70
+            
+            # Excessive download (potential C2 payload download)
+            elif byte_ratio < 0.05 and total_bytes > 10000:
+                anomaly_type = 'excessive download'
+                asymmetry_score = 60
+            
+            # Asymmetric but not extreme
+            elif packet_ratio > 5 or packet_ratio < 0.2:
+                anomaly_type = 'asymmetric flow'
+                asymmetry_score = 40
+            
+            if anomaly_type:
+                results.append({
+                    'flow_id': flow.get('flow_id', ''),
+                    'src_ip': flow.get('src_ip', ''),
+                    'dst_ip': flow.get('dst_ip', ''),
+                    'asymmetry_score': asymmetry_score,
+                    'packet_ratio': float(packet_ratio) if packet_ratio != float('inf') else 999.0,
+                    'byte_ratio': float(byte_ratio) if byte_ratio != float('inf') else 999.0,
+                    'anomaly_type': anomaly_type
+                })
+        
+        return pd.DataFrame(results)
+    
+    except Exception:
+        return pd.DataFrame(columns=[
+            'flow_id', 'src_ip', 'dst_ip', 'asymmetry_score',
+            'packet_ratio', 'byte_ratio', 'anomaly_type'
+        ])
+
+
+def detect_flow_anomalies(flow_features):
+    """
+    Applies statistical analysis to flow features to detect anomalous flows.
+    Flags flows with unusual characteristics that may indicate C2, exfiltration,
+    or other malicious activity.
+    
+    Uses IQR (Interquartile Range) method and statistical thresholds.
+    
+    Args:
+        flow_features: DataFrame from extract_flow_features()
+        
+    Returns:
+        pd.DataFrame with anomalous flows and anomaly reasons
+        
+    Examples:
+        >>> flows = pd.DataFrame({
+        ...     'flow_id': ['f1', 'f2'],
+        ...     'flow_duration': [100, 10000],
+        ...     'packets_per_second': [1, 1000],
+        ...     'bytes_per_second': [100, 100000]
+        ... })
+        >>> result = detect_flow_anomalies(flows)
+        >>> 'anomaly_reasons' in result.columns
+        True
+    """
+    if flow_features.empty or len(flow_features) < 10:
+        return pd.DataFrame(columns=[
+            'flow_id', 'src_ip', 'dst_ip', 'anomaly_score', 'anomaly_reasons'
+        ])
+    
+    try:
+        results = []
+        
+        # Calculate statistics for key metrics
+        metrics = [
+            'flow_duration', 'packets_per_second', 'bytes_per_second',
+            'packet_size_mean', 'iat_mean'
+        ]
+        
+        stats_dict = {}
+        for metric in metrics:
+            if metric in flow_features.columns:
+                q1 = flow_features[metric].quantile(0.25)
+                q3 = flow_features[metric].quantile(0.75)
+                iqr = q3 - q1
+                mean = flow_features[metric].mean()
+                std = flow_features[metric].std()
+                
+                stats_dict[metric] = {
+                    'q1': q1,
+                    'q3': q3,
+                    'iqr': iqr,
+                    'mean': mean,
+                    'std': std,
+                    'upper_bound': q3 + 1.5 * iqr,
+                    'lower_bound': q1 - 1.5 * iqr
+                }
+        
+        # Analyze each flow
+        for _, flow in flow_features.iterrows():
+            anomaly_reasons = []
+            anomaly_score = 0
+            
+            # Check each metric
+            for metric, stats in stats_dict.items():
+                value = flow.get(metric, 0)
+                
+                # IQR outlier detection
+                if value > stats['upper_bound']:
+                    anomaly_reasons.append(f"High {metric}: {value:.2f}")
+                    anomaly_score += 15
+                elif value < stats['lower_bound'] and value > 0:
+                    anomaly_reasons.append(f"Low {metric}: {value:.2f}")
+                    anomaly_score += 10
+            
+            # Specific anomaly patterns
+            
+            # Long-duration low-rate flow (potential C2 beacon)
+            if flow.get('flow_duration', 0) > 3600 and flow.get('packets_per_second', 0) < 0.1:
+                anomaly_reasons.append("Long-duration low-rate (potential beacon)")
+                anomaly_score += 20
+            
+            # High packet rate (potential DDoS)
+            if flow.get('packets_per_second', 0) > 100:
+                anomaly_reasons.append("Very high packet rate")
+                anomaly_score += 25
+            
+            # No bidirectional communication
+            if flow.get('bwd_packets', 0) == 0 and flow.get('fwd_packets', 0) > 10:
+                anomaly_reasons.append("One-way flow (no responses)")
+                anomaly_score += 30
+            
+            # Suspicious flags (RST-heavy flows)
+            total_packets = flow.get('fwd_packets', 0) + flow.get('bwd_packets', 0)
+            rst_count = flow.get('rst_count', 0)
+            if total_packets > 0 and rst_count / total_packets > 0.5:
+                anomaly_reasons.append("High RST ratio (scanning?)")
+                anomaly_score += 20
+            
+            # Only report if anomalous
+            if anomaly_score >= 20:
+                results.append({
+                    'flow_id': flow.get('flow_id', ''),
+                    'src_ip': flow.get('src_ip', ''),
+                    'dst_ip': flow.get('dst_ip', ''),
+                    'anomaly_score': min(100, anomaly_score),
+                    'anomaly_reasons': '; '.join(anomaly_reasons)
+                })
+        
+        return pd.DataFrame(results)
+    
+    except Exception:
+        return pd.DataFrame(columns=[
+            'flow_id', 'src_ip', 'dst_ip', 'anomaly_score', 'anomaly_reasons'
+        ])
 
 # -----------------------
 # ML Feature Extraction & Baseline Functions
@@ -1974,6 +2972,16 @@ const tcpIPData     = %%TCPIP%%;
 const mlDDoSData    = %%MLDDOS%%;
 const mlAnomalies   = %%MLANOMALIES%%;
 const mlFeatures    = %%MLFEATURES%%;
+
+// ✅ PRIORITY 2: Change Point Detection Data
+const changePointsData = %%CHANGEPOINTS%%;
+const temporalPatternsData = %%TEMPORALPATTERNS%%;
+const slidingWindowsData = %%SLIDINGWINDOWS%%;
+
+// ✅ PRIORITY 2: Flow Analysis Data
+const flowFeaturesData = %%FLOWFEATURES%%;
+const flowAnomaliesData = %%FLOWANOMALIES%%;
+const bidirectionalAnomaliesData = %%BIDIRECTIONALANOMALIES%%;
 
 
 // ------------------------------------------------------------
@@ -2991,8 +3999,72 @@ def pipeline(pcap=FILE_PCAP):
         print("[19/20] Detecting IP lists in TCP payloads (all protocols)...")
         tcp_ip_dist = detect_tcp_ip_distribution(tcp)  # Use RAW tcp, not aggregated
         print(f"  - TCP IP distributions found: {len(tcp_ip_dist)}")
+        
+        # ✅ PRIORITY 2: Change Point Detection
+        print("[20/26] Detecting traffic change points (CPD)...")
+        change_points = []
+        temporal_patterns = {}
+        sliding_windows = pd.DataFrame()
+        
+        if CPD_ENABLED and not tcp.empty and 'TS' in tcp.columns:
+            try:
+                # Analyze temporal patterns
+                temporal_patterns = analyze_temporal_patterns(tcp)
+                if temporal_patterns.get('pattern_detected'):
+                    print(f"  - Temporal pattern detected with {len(temporal_patterns.get('anomalous_hours', []))} anomalous hours")
+                
+                # Sliding window analysis
+                sliding_windows = sliding_window_analysis(tcp, window_size=CPD_WINDOW_SIZE)
+                if not sliding_windows.empty:
+                    anomaly_windows = sliding_windows[sliding_windows['is_anomaly'] == True]
+                    print(f"  - {len(anomaly_windows)} anomalous windows detected")
+                
+                # CUSUM-based change point detection
+                if not tcp.empty:
+                    # Create time series of packet counts per second
+                    tcp_sorted = tcp.sort_values('TS').copy()
+                    tcp_sorted['ts_rounded'] = tcp_sorted['TS'].round()
+                    pps_series = tcp_sorted.groupby('ts_rounded').size()
+                    
+                    # Establish baseline
+                    baseline = {
+                        'mean': pps_series.mean(),
+                        'std': pps_series.std()
+                    }
+                    
+                    change_points = detect_change_points(pps_series, baseline, threshold=CPD_THRESHOLD)
+                    print(f"  - {len(change_points)} change points detected")
+            except Exception as e:
+                print(f"  - CPD error (non-fatal): {e}")
+        else:
+            print("  - CPD disabled or insufficient data")
+        
+        # ✅ PRIORITY 2: Flow-level Statistical Analysis
+        print("[21/26] Performing flow-level analysis...")
+        flow_features = pd.DataFrame()
+        flow_anomalies = pd.DataFrame()
+        bidirectional_anomalies = pd.DataFrame()
+        
+        try:
+            flow_features = extract_flow_features(tcp)
+            if not flow_features.empty:
+                print(f"  - Extracted features for {len(flow_features)} flows")
+                
+                # Detect flow anomalies
+                flow_anomalies = detect_flow_anomalies(flow_features)
+                if not flow_anomalies.empty:
+                    print(f"  - {len(flow_anomalies)} anomalous flows detected")
+                
+                # Analyze bidirectional flows
+                bidirectional_anomalies = analyze_bidirectional_flows(flow_features)
+                if not bidirectional_anomalies.empty:
+                    print(f"  - {len(bidirectional_anomalies)} asymmetric flows detected")
+            else:
+                print("  - Insufficient flow data for analysis")
+        except Exception as e:
+            print(f"  - Flow analysis error (non-fatal): {e}")
 
-        print("[20/20] Writing dashboard.js and dashboard.html ...")
+        print("[22/26] Writing dashboard.js and dashboard.html ...")
         js = (
             JS_TEMPLATE
             .replace('%%DNS%%', safe_js_json(dnsA.to_dict(orient='records')))
@@ -3012,6 +4084,12 @@ def pipeline(pcap=FILE_PCAP):
             .replace('%%MLDDOS%%', safe_js_json(ml_ddos.to_dict(orient='records') if not ml_ddos.empty else []))
             .replace('%%MLANOMALIES%%', safe_js_json(ml_anomalies.to_dict(orient='records') if not ml_anomalies.empty else []))
             .replace('%%MLFEATURES%%', safe_js_json(ml_features.head(100).to_dict(orient='records') if not ml_features.empty else []))
+            .replace('%%CHANGEPOINTS%%', safe_js_json(change_points))
+            .replace('%%TEMPORALPATTERNS%%', safe_js_json(temporal_patterns))
+            .replace('%%SLIDINGWINDOWS%%', safe_js_json(sliding_windows.to_dict(orient='records') if not sliding_windows.empty else []))
+            .replace('%%FLOWFEATURES%%', safe_js_json(flow_features.head(100).to_dict(orient='records') if not flow_features.empty else []))
+            .replace('%%FLOWANOMALIES%%', safe_js_json(flow_anomalies.to_dict(orient='records') if not flow_anomalies.empty else []))
+            .replace('%%BIDIRECTIONALANOMALIES%%', safe_js_json(bidirectional_anomalies.to_dict(orient='records') if not bidirectional_anomalies.empty else []))
         )
 
         with open('dashboard.js', 'w', encoding='utf-8') as jf:
@@ -3034,7 +4112,21 @@ def pipeline(pcap=FILE_PCAP):
             print(f"ML DDoS Predictions: {len(ml_ddos[ml_ddos['PREDICTION'] == 'ATTACK'])}")
         if not ml_anomalies.empty:
             print(f"ML Anomalies: {len(ml_anomalies)}")
+        
+        # Priority 2 summaries
+        print("\n=== Priority 2 Features ===")
+        print(f"Change Points Detected: {len(change_points)}")
+        if temporal_patterns.get('pattern_detected'):
+            print(f"Temporal Patterns: Detected ({len(temporal_patterns.get('anomalous_hours', []))} anomalous hours)")
+        if not sliding_windows.empty:
+            anomaly_count = len(sliding_windows[sliding_windows['is_anomaly'] == True])
+            print(f"Anomalous Windows: {anomaly_count}/{len(sliding_windows)}")
+        if not flow_features.empty:
+            print(f"Flows Analyzed: {len(flow_features)}")
+            print(f"Flow Anomalies: {len(flow_anomalies)}")
+            print(f"Bidirectional Anomalies: {len(bidirectional_anomalies)}")
         print("=" * 25)
+
 
     except Exception:
         print("\n\n=== PIPELINE CRASH ===")

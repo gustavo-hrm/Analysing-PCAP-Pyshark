@@ -5,6 +5,7 @@ tqdm>=4.62.0
 
 # Machine Learning (optional but recommended)
 scikit-learn>=1.0.0
+scipy>=1.7.0
 
 # Network analysis
 # scapy>=2.4.5  # Uncomment if scapy available in environment
