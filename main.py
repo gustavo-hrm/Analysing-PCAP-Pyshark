@@ -3117,19 +3117,24 @@ def detect_rdp_activity(tcp_df):
         # Analyze connection patterns
         if 'SRC_IP' in rdp_traffic.columns and 'DST_IP' in rdp_traffic.columns:
             # Group by source IP to detect brute force
-            conn_analysis = rdp_traffic.groupby(['SRC_IP', 'DST_IP']).agg({
-                'COUNT': 'sum' if 'COUNT' in rdp_traffic.columns else 'size',
-                'TS': ['min', 'max', 'count'] if 'TS' in rdp_traffic.columns else 'count'
-            }).reset_index()
+            agg_dict = {'COUNT': 'sum' if 'COUNT' in rdp_traffic.columns else 'size'}
+            if 'TS' in rdp_traffic.columns:
+                agg_dict['TS'] = ['min', 'max', 'count']
+            
+            conn_analysis = rdp_traffic.groupby(['SRC_IP', 'DST_IP']).agg(agg_dict).reset_index()
             
             for _, row in conn_analysis.iterrows():
                 src_ip = row['SRC_IP']
                 dst_ip = row['DST_IP']
                 
-                if isinstance(row['COUNT'], tuple):
-                    attempt_count = row['COUNT'][0] if len(row['COUNT']) > 0 else 0
+                # Extract COUNT properly whether it's aggregated or not
+                if 'COUNT' in conn_analysis.columns:
+                    if isinstance(row['COUNT'], (int, float, np.integer, np.floating)):
+                        attempt_count = int(row['COUNT'])
+                    else:
+                        attempt_count = int(row['COUNT'][0]) if hasattr(row['COUNT'], '__getitem__') else 0
                 else:
-                    attempt_count = row['COUNT']
+                    attempt_count = 1
                 
                 score = 0
                 status = 'Normal'
