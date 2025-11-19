@@ -13,22 +13,16 @@ Network traffic analysis tool with ML-enhanced DDoS & C2 detection and comprehen
 - **Threat Detection**: C2 communications, DDoS attacks, beaconing, data exfiltration, brute force
 - **Machine Learning**: Random Forest classification, Isolation Forest anomaly detection
 - **Interactive Dashboard**: HTML/JavaScript dashboard with DataTables integration
-
-### Priority 1: Enhanced C2 Detection
 - DNS tunneling detection with entropy analysis
 - HTTP C2 target distribution analysis
 - Beaconing detection with jitter tolerance
 - JA3 fingerprinting for TLS analysis
 - Advanced DGA detection with Levenshtein distance
-
-### Priority 2: ML-Enhanced Features
 - Change Point Detection (CPD) with CUSUM algorithm
 - Temporal pattern analysis
 - Sliding window anomaly detection
 - Bidirectional flow analysis
 - Flow-level statistical analysis
-
-### Priority 3: Expanded Protocol Coverage ✨ NEW
 - **SMB/CIFS** (Ports 445, 139): Lateral movement, ransomware detection
 - **RDP** (Port 3389): Brute force attack detection
 - **SSH** (Port 22): Scanning, brute force, tunneling detection
@@ -37,7 +31,7 @@ Network traffic analysis tool with ML-enhanced DDoS & C2 detection and comprehen
 - **IRC** (Ports 6667, 6697, 194): C2 channel detection
 - **P2P** (BitTorrent DHT): Malware distribution detection
 
-### Multi-Source Correlation ✨ NEW
+### Multi-Source Correlation
 - **Shared C2 Infrastructure**: Detects same C2 IPs, domains, JA3 fingerprints across networks
 - **Coordinated Attacks**: Identifies DDoS campaigns and botnet activity across sources
 - **Lateral Movement**: Tracks attackers moving between monitored networks
@@ -119,7 +113,7 @@ Open `dashboard.html` in a web browser to view the analysis.
 - Temporal patterns
 - Flow anomalies
 
-### Protocol Detection (Priority 3)
+### Protocol Detection
 - SMB/CIFS activity with lateral movement scoring
 - RDP brute force attempts
 - SSH scanning and attacks
@@ -136,25 +130,6 @@ Open `dashboard.html` in a web browser to view the analysis.
 - Lateral movement detection (cross-network)
 - Synchronized beacon timing
 - Confidence-scored correlations
-
-## Testing
-
-### Run All Tests
-```bash
-# Priority 2 tests
-python3 test_priority2.py
-
-# Priority 3 tests
-python3 test_priority3.py
-
-# Integration tests
-python3 test_integration_priority3.py
-```
-
-### Test Coverage
-- 8 Priority 2 tests (change point detection, DGA, flow analysis)
-- 10 Priority 3 tests (protocol detection functions)
-- 7 Integration tests (synthetic attack scenarios)
 
 ## Configuration
 
@@ -349,44 +324,3 @@ See CONTRIBUTING.md for development guidelines.
 - Original implementation: gustavo-hrm
 - Priority 3 enhancement: GitHub Copilot
 
-## Changelog
-
-### v23.0 (2025-11-19) - Multi-Source PCAP Correlation
-- ✨ **Multi-source analysis**: Analyze 2+ PCAP files simultaneously
-- 🎯 **Shared C2 infrastructure detection**: Same IPs, domains, JA3 fingerprints across sources
-- ⚔️ **Coordinated attack correlation**: DDoS campaigns and botnet activity detection
-- 🔄 **Lateral movement tracking**: Attackers moving between monitored networks
-- 📡 **Beacon synchronization**: Synchronized C2 beacons (shared heartbeat patterns)
-- 📊 **SOURCE_ID tracking**: All packets tagged with source identifier
-- 🎨 **Enhanced dashboard**: 5 new correlation tables with confidence scoring
-- 🧪 **Comprehensive testing**: 8 new multi-source tests + integration tests
-- 📝 **Command-line interface**: `--sources` and `--sources-dir` arguments
-- ♻️ **Backward compatible**: Single-file analysis still works
-- 0 security vulnerabilities (CodeQL verified)
-
-### v22.0 (2025-11-19) - Priority 3: Expanded Protocol Coverage
-- Added SMB/CIFS lateral movement detection
-- Added RDP brute force detection
-- Added SSH scanning and attack detection
-- Added FTP/SFTP exfiltration detection
-- Added SMTP spam botnet detection
-- Added IRC C2 channel detection
-- Added P2P malware distribution detection
-- Added protocol threat aggregation
-- Added 8 new dashboard tables
-- Created comprehensive test suite (17 tests)
-- 0 security vulnerabilities
-
-### v21.0 - Priority 2: ML-Enhanced Detection
-- ML-based DDoS classification
-- Anomaly detection with Isolation Forest
-- Change point detection with CUSUM
-- Temporal pattern analysis
-- Flow-level statistical analysis
-
-### v20.0 - Priority 1: Enhanced C2 Detection
-- DNS tunneling detection
-- HTTP C2 target distribution
-- Beaconing detection with jitter
-- JA3 fingerprinting
-- Advanced DGA detection
