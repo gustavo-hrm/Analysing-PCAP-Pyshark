@@ -322,5 +322,3 @@ See CONTRIBUTING.md for development guidelines.
 ## Authors
 
 - Original implementation: gustavo-hrm
-- Priority 3 enhancement: GitHub Copilot
-
