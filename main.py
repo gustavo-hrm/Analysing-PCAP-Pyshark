@@ -14,6 +14,8 @@ import traceback
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+import argparse
+import glob
 
 # scapy import with lazy fallback if running where scapy not available for dry-run
 try:
@@ -217,6 +219,14 @@ RDP_BRUTE_THRESHOLD = 10        # Failed attempts
 SSH_BRUTE_THRESHOLD = 10        # Failed attempts
 FTP_EXFIL_SIZE = 10485760       # 10MB
 SMTP_MASS_MAIL_THRESHOLD = 50   # Emails per minute
+
+# -----------------------
+# Multi-Source Correlation Configuration
+# -----------------------
+MULTI_SOURCE_ENABLED = True
+CORRELATION_TIME_WINDOW = 300  # 5 minutes in seconds
+MIN_SOURCES_FOR_CORRELATION = 2
+CORRELATION_CONFIDENCE_THRESHOLD = 0.7
 
 # -----------------------
 # Utilities
@@ -429,7 +439,7 @@ def tcp_flags_str_local(pkt):
 # -----------------------
 # ✅ ENHANCED: Single-pass PCAP parser with TCP/HTTP PAYLOAD STORAGE
 # -----------------------
-def parse_streams(pcap_path):
+def parse_streams(pcap_path, source_id='default'):
     dns_rows = []
     tcp_rows = []
     http_rows = []
@@ -442,24 +452,24 @@ def parse_streams(pcap_path):
     if not PcapReader:
         # scapy not available: return empty frames with expected columns
         return (
-            pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT','PAYLOAD']),
-            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','DST_IP','PAYLOAD']),
-            pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS'])
+            pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY','SOURCE_ID']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT','PAYLOAD','SOURCE_ID']),
+            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','DST_IP','PAYLOAD','SOURCE_ID']),
+            pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT','SOURCE_ID']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE','SOURCE_ID']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE','SOURCE_ID']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS','SOURCE_ID'])
         )
 
     if not os.path.exists(pcap_path):
         return (
-            pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT','PAYLOAD']),
-            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','DST_IP','PAYLOAD']),
-            pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE']),
-            pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS'])
+            pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY','SOURCE_ID']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT','PAYLOAD','SOURCE_ID']),
+            pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','DST_IP','PAYLOAD','SOURCE_ID']),
+            pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT','SOURCE_ID']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE','SOURCE_ID']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE','SOURCE_ID']),
+            pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS','SOURCE_ID'])
         )
 
     with PcapReader(pcap_path) as rdr:
@@ -502,11 +512,12 @@ def parse_streams(pcap_path):
                                     'QUERY_SIZE': query_size if not a else 0,
                                     'RESPONSE_SIZE': response_size,
                                     'DOMAIN': domain,
-                                    'TS': ts
+                                    'TS': ts,
+                                    'SOURCE_ID': source_id
                                 })
                             
                             if not is_trusted_domain(domain):
-                                dns_rows.append({'DOMAIN':domain,'A':a,'COUNT':1,'ENTROPY':shannon_entropy(domain)})
+                                dns_rows.append({'DOMAIN':domain,'A':a,'COUNT':1,'ENTROPY':shannon_entropy(domain),'SOURCE_ID':source_id})
                     except Exception:
                         pass
 
@@ -535,7 +546,8 @@ def parse_streams(pcap_path):
                             'SIZE':pkt_size,
                             'SRC_PORT':src_port,
                             'DST_PORT':dst_port,
-                            'PAYLOAD':raw_payload[:5000]  # ✅ NEW: Store payload
+                            'PAYLOAD':raw_payload[:5000],  # ✅ NEW: Store payload
+                            'SOURCE_ID':source_id
                         })
 
                         # HTTP + TLS payload analysis
@@ -568,7 +580,8 @@ def parse_streams(pcap_path):
                                         'TS': ts,
                                         'SRC_IP': src,
                                         'DST_IP': dst,
-                                        'PAYLOAD': txt[:5000]  # ✅ NEW: Store HTTP request payload
+                                        'PAYLOAD': txt[:5000],  # ✅ NEW: Store HTTP request payload
+                                        'SOURCE_ID': source_id
                                     })
                             
                             # ✅ NEW: Detect HTTP RESPONSES
@@ -586,7 +599,8 @@ def parse_streams(pcap_path):
                                         'TS': ts,
                                         'SRC_IP': src,
                                         'DST_IP': dst,
-                                        'PAYLOAD': txt[:5000]  # ✅ NEW: Store HTTP response payload
+                                        'PAYLOAD': txt[:5000],  # ✅ NEW: Store HTTP response payload
+                                        'SOURCE_ID': source_id
                                     })
 
                             # TLS ClientHello: SNI + JA3
@@ -596,7 +610,7 @@ def parse_streams(pcap_path):
                                 if sni or ja3:
                                     sni_clean = sni.strip().rstrip('.') if sni else ''
                                     if not (sni_clean and is_trusted_domain(sni_clean)):
-                                        tls_rows.append({'SNI': sni_clean, 'JA3': ja3, 'SRC_IP': src, 'DST_IP': dst, 'COUNT': 1})
+                                        tls_rows.append({'SNI': sni_clean, 'JA3': ja3, 'SRC_IP': src, 'DST_IP': dst, 'COUNT': 1, 'SOURCE_ID': source_id})
                             except Exception:
                                 pass
                 
@@ -614,7 +628,8 @@ def parse_streams(pcap_path):
                             'SRC_PORT': src_port,
                             'DST_PORT': dst_port,
                             'TS': ts,
-                            'SIZE': pkt_size
+                            'SIZE': pkt_size,
+                            'SOURCE_ID': source_id
                         })
                 
                 # ICMP traffic for flood detection - Support IPv4 and ICMPv6
@@ -629,7 +644,8 @@ def parse_streams(pcap_path):
                             'DST_IP': dst,
                             'ICMP_TYPE': icmp_type,
                             'TS': ts,
-                            'SIZE': pkt_size
+                            'SIZE': pkt_size,
+                            'SOURCE_ID': source_id
                         })
                 
                 # ICMPv6 traffic for flood detection
@@ -645,19 +661,20 @@ def parse_streams(pcap_path):
                             'DST_IP': dst,
                             'ICMP_TYPE': icmp_type,
                             'TS': ts,
-                            'SIZE': pkt_size
+                            'SIZE': pkt_size,
+                            'SOURCE_ID': source_id
                         })
 
             except Exception:
                 continue
 
-    dns_df = pd.DataFrame(dns_rows) if dns_rows else pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY'])
-    tcp_df = pd.DataFrame(tcp_rows) if tcp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT','PAYLOAD'])
-    http_df = pd.DataFrame(http_rows) if http_rows else pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','DST_IP','PAYLOAD'])
-    tls_df = pd.DataFrame(tls_rows) if tls_rows else pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT'])
-    udp_df = pd.DataFrame(udp_rows) if udp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE'])
-    icmp_df = pd.DataFrame(icmp_rows) if icmp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE'])
-    dns_detail_df = pd.DataFrame(dns_detail_rows) if dns_detail_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS'])
+    dns_df = pd.DataFrame(dns_rows) if dns_rows else pd.DataFrame(columns=['DOMAIN','A','COUNT','ENTROPY','SOURCE_ID'])
+    tcp_df = pd.DataFrame(tcp_rows) if tcp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','FLAGS','COUNT','TS','SIZE','SRC_PORT','DST_PORT','PAYLOAD','SOURCE_ID'])
+    http_df = pd.DataFrame(http_rows) if http_rows else pd.DataFrame(columns=['DOMAIN','REQUEST','COUNT','METHOD','TS','SRC_IP','DST_IP','PAYLOAD','SOURCE_ID'])
+    tls_df = pd.DataFrame(tls_rows) if tls_rows else pd.DataFrame(columns=['SNI','JA3','SRC_IP','DST_IP','COUNT','SOURCE_ID'])
+    udp_df = pd.DataFrame(udp_rows) if udp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','SRC_PORT','DST_PORT','TS','SIZE','SOURCE_ID'])
+    icmp_df = pd.DataFrame(icmp_rows) if icmp_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','ICMP_TYPE','TS','SIZE','SOURCE_ID'])
+    dns_detail_df = pd.DataFrame(dns_detail_rows) if dns_detail_rows else pd.DataFrame(columns=['SRC_IP','DST_IP','QUERY_SIZE','RESPONSE_SIZE','DOMAIN','TS','SOURCE_ID'])
     
     return dns_df, tcp_df, http_df, tls_df, udp_df, icmp_df, dns_detail_df
 
@@ -3828,6 +3845,13 @@ const ircData = %%IRC%%;
 const p2pData = %%P2P%%;
 const protocolThreatsData = %%PROTOCOLTHREATS%%;
 
+// ✅ MULTI-SOURCE CORRELATION DATA
+const correlationC2Data = %%CORRELATION_C2%%;
+const correlationAttacksData = %%CORRELATION_ATTACKS%%;
+const correlationLateralData = %%CORRELATION_LATERAL%%;
+const correlationBeaconsData = %%CORRELATION_BEACONS%%;
+const sourceMetadataData = %%SOURCE_METADATA%%;
+
 
 // ------------------------------------------------------------
 // Table rendering helper
@@ -4073,6 +4097,42 @@ function updateDashboard(){
   if(document.querySelector('#tbl_protocol_threats tbody')) {
     renderTableRows(document.querySelector('#tbl_protocol_threats tbody'), protocolThreatSlice,
       ['INDICATOR','TYPE','PROTOCOL','SCORE','COUNT','SRC_IP']);
+  }
+  
+  // ✅ MULTI-SOURCE CORRELATION TABLES
+  // Source Metadata
+  const sourceMetaSlice = (sourceMetadataData||[]).slice(0,50);
+  if(document.querySelector('#tbl_source_metadata tbody')) {
+    renderTableRows(document.querySelector('#tbl_source_metadata tbody'), sourceMetaSlice,
+      ['SOURCE_ID','PCAP_FILE','PACKETS','PROTOCOLS']);
+  }
+  
+  // Cross-Source C2 Correlation
+  const correlationC2Slice = (correlationC2Data||[]).slice().sort((a,b)=>(b.CONFIDENCE_SCORE||0)-(a.CONFIDENCE_SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_correlation_c2 tbody')) {
+    renderTableRows(document.querySelector('#tbl_correlation_c2 tbody'), correlationC2Slice,
+      ['C2_INDICATOR','SOURCES','SOURCE_COUNT','CONFIDENCE_SCORE','TYPE']);
+  }
+  
+  // Coordinated Attack Correlation
+  const correlationAttacksSlice = (correlationAttacksData||[]).slice().sort((a,b)=>(b.CONFIDENCE_SCORE||0)-(a.CONFIDENCE_SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_correlation_attacks tbody')) {
+    renderTableRows(document.querySelector('#tbl_correlation_attacks tbody'), correlationAttacksSlice,
+      ['ATTACK_PATTERN','SOURCES','SOURCE_COUNT','TIME_SPREAD','CONFIDENCE_SCORE','TYPE']);
+  }
+  
+  // Lateral Movement Correlation
+  const correlationLateralSlice = (correlationLateralData||[]).slice().sort((a,b)=>(b.CONFIDENCE_SCORE||0)-(a.CONFIDENCE_SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_correlation_lateral tbody')) {
+    renderTableRows(document.querySelector('#tbl_correlation_lateral tbody'), correlationLateralSlice,
+      ['ATTACKER_IP','SOURCES','SOURCE_COUNT','ACTIVITIES','AVG_THREAT_SCORE','CONFIDENCE_SCORE']);
+  }
+  
+  // Beacon Timing Correlation
+  const correlationBeaconsSlice = (correlationBeaconsData||[]).slice().sort((a,b)=>(b.CONFIDENCE_SCORE||0)-(a.CONFIDENCE_SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_correlation_beacons tbody')) {
+    renderTableRows(document.querySelector('#tbl_correlation_beacons tbody'), correlationBeaconsSlice,
+      ['BEACON_DESTINATION','AVG_INTERVAL','SOURCES','SOURCE_COUNT','CONFIDENCE_SCORE','TYPE']);
   }
 
   // ------------------------
@@ -4514,6 +4574,41 @@ button:hover {
   <div class='table-wrap'><table id='tbl_protocol_threats' class='display'><thead><tr><th>Indicator</th><th>Type</th><th>Protocol</th><th>Score</th><th>Count</th><th>SRC IP</th></tr></thead><tbody></tbody></table></div>
 </div>
 
+<div style='margin-top:24px; padding:12px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius:8px;'>
+  <h2 style='color: white; margin: 0; font-size: 18px; text-align: center;'>🔗 Multi-Source Correlation Analysis</h2>
+  <p style='color: rgba(255,255,255,0.9); font-size: 11px; text-align: center; margin: 4px 0 0 0;'>Cross-network detection of coordinated attacks, shared infrastructure, and lateral movement</p>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>📊 Source Metadata</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Overview of analyzed PCAP sources</p>
+  <div class='table-wrap'><table id='tbl_source_metadata' class='display'><thead><tr><th>Source ID</th><th>PCAP File</th><th>Packets</th><th>Protocols</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>🎯 Shared C2 Infrastructure</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>C2 indicators detected across multiple sources (same IPs, domains, JA3 fingerprints)</p>
+  <div class='table-wrap'><table id='tbl_correlation_c2' class='display'><thead><tr><th>C2 Indicator</th><th>Sources</th><th>Source Count</th><th>Confidence</th><th>Type</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>⚔️ Coordinated Attack Patterns</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>DDoS attacks and coordinated campaigns detected across sources</p>
+  <div class='table-wrap'><table id='tbl_correlation_attacks' class='display'><thead><tr><th>Attack Pattern</th><th>Sources</th><th>Source Count</th><th>Time Spread (s)</th><th>Confidence</th><th>Type</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>🔄 Lateral Movement Detection</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Attackers moving between monitored networks (pivot points and compromised hosts)</p>
+  <div class='table-wrap'><table id='tbl_correlation_lateral' class='display'><thead><tr><th>Attacker IP</th><th>Sources</th><th>Source Count</th><th>Activities</th><th>Avg Threat Score</th><th>Confidence</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>📡 Synchronized C2 Beacons</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Beacon timing correlation (shared C2 heartbeat patterns)</p>
+  <div class='table-wrap'><table id='tbl_correlation_beacons' class='display'><thead><tr><th>Destination</th><th>Avg Interval (s)</th><th>Sources</th><th>Source Count</th><th>Confidence</th><th>Type</th></tr></thead><tbody></tbody></table></div>
+</div>
+
 <div style='margin-top:18px' class='card'>
   <h3>Advanced Heuristics</h3>
   <div class='table-wrap'><table id='tbl_adv' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
@@ -4547,21 +4642,314 @@ button:hover {
 """
 
 # -----------------------
+# Multi-Source Correlation Functions
+# -----------------------
+
+def correlate_cross_source_c2(source_data):
+    """
+    Detect shared C2 infrastructure across sources
+    
+    Detection criteria:
+    1. Same C2 IP/domain seen in 2+ sources
+    2. Same JA3 fingerprint with similar SNI patterns
+    3. Similar beacon intervals across sources
+    4. Shared target lists
+    
+    Args:
+        source_data: Dictionary of {source_id: detection_results}
+        
+    Returns:
+        DataFrame with columns [C2_INDICATOR, SOURCES, SOURCE_COUNT, CONFIDENCE_SCORE, TYPE]
+    """
+    rows = []
+    
+    # Collect all C2 indicators from all sources
+    c2_map = defaultdict(lambda: {'sources': set(), 'details': []})
+    
+    for source_id, data in source_data.items():
+        c2_detections = data.get('c2_full', pd.DataFrame())
+        if c2_detections.empty:
+            continue
+            
+        for _, row in c2_detections.iterrows():
+            indicator = row.get('INDICATOR', '')
+            if not indicator:
+                continue
+            c2_map[indicator]['sources'].add(source_id)
+            c2_map[indicator]['details'].append(row)
+    
+    # Find indicators seen in multiple sources
+    for indicator, info in c2_map.items():
+        if len(info['sources']) >= MIN_SOURCES_FOR_CORRELATION:
+            confidence = min(100, 60 + (len(info['sources']) * 10))
+            rows.append({
+                'C2_INDICATOR': indicator,
+                'SOURCES': ', '.join(sorted(info['sources'])),
+                'SOURCE_COUNT': len(info['sources']),
+                'CONFIDENCE_SCORE': confidence,
+                'TYPE': 'Shared C2 Infrastructure'
+            })
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['C2_INDICATOR', 'SOURCES', 'SOURCE_COUNT', 'CONFIDENCE_SCORE', 'TYPE'])
+
+
+def correlate_attack_patterns(source_data):
+    """
+    Detect coordinated DDoS attacks across sources
+    
+    Identifies:
+    - Coordinated DDoS attacks targeting same victims
+    - Botnet activity patterns across networks
+    - Synchronized attack campaigns
+    
+    Args:
+        source_data: Dictionary of {source_id: detection_results}
+        
+    Returns:
+        DataFrame with temporal and behavioral correlation
+    """
+    rows = []
+    
+    # Collect DDoS detections from all sources
+    ddos_map = defaultdict(lambda: {'sources': set(), 'timestamps': [], 'targets': set()})
+    
+    for source_id, data in source_data.items():
+        ddos_detections = data.get('ddos', pd.DataFrame())
+        if ddos_detections.empty:
+            continue
+            
+        for _, row in ddos_detections.iterrows():
+            attack_type = row.get('ATTACK_TYPE', '')
+            target = row.get('TARGET', '')
+            timestamp = row.get('FIRST_SEEN', 0)
+            
+            key = f"{attack_type}_{target}"
+            ddos_map[key]['sources'].add(source_id)
+            ddos_map[key]['timestamps'].append(timestamp)
+            ddos_map[key]['targets'].add(target)
+    
+    # Find coordinated attacks (same target, similar timeframe, multiple sources)
+    for attack_key, info in ddos_map.items():
+        if len(info['sources']) >= MIN_SOURCES_FOR_CORRELATION:
+            # Check temporal correlation (within CORRELATION_TIME_WINDOW)
+            if len(info['timestamps']) > 1:
+                timestamps = sorted(info['timestamps'])
+                time_spread = timestamps[-1] - timestamps[0]
+                
+                if time_spread <= CORRELATION_TIME_WINDOW:
+                    confidence = min(100, 70 + (len(info['sources']) * 5))
+                    rows.append({
+                        'ATTACK_PATTERN': attack_key,
+                        'SOURCES': ', '.join(sorted(info['sources'])),
+                        'SOURCE_COUNT': len(info['sources']),
+                        'TIME_SPREAD': time_spread,
+                        'CONFIDENCE_SCORE': confidence,
+                        'TYPE': 'Coordinated DDoS Attack'
+                    })
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['ATTACK_PATTERN', 'SOURCES', 'SOURCE_COUNT', 'TIME_SPREAD', 'CONFIDENCE_SCORE', 'TYPE'])
+
+
+def detect_lateral_movement_across_sources(source_data):
+    """
+    Track attackers moving between monitored networks
+    
+    Identifies:
+    - Same attacker IP across different networks
+    - Pivot points and compromised hosts
+    - Multi-stage attack chains
+    
+    Args:
+        source_data: Dictionary of {source_id: detection_results}
+        
+    Returns:
+        DataFrame with movement chains
+    """
+    rows = []
+    
+    # Track suspicious IPs across sources
+    ip_map = defaultdict(lambda: {'sources': set(), 'activities': [], 'scores': []})
+    
+    for source_id, data in source_data.items():
+        # Check C2 detections for malicious IPs
+        c2_detections = data.get('c2_full', pd.DataFrame())
+        if not c2_detections.empty and 'SRC_IP' in c2_detections.columns:
+            for _, row in c2_detections.iterrows():
+                src_ip = row.get('SRC_IP', '')
+                if src_ip and src_ip != 'None':
+                    ip_map[src_ip]['sources'].add(source_id)
+                    ip_map[src_ip]['activities'].append(row.get('TYPE', 'Unknown'))
+                    ip_map[src_ip]['scores'].append(row.get('SCORE', 0))
+        
+        # Check protocol threats for lateral movement
+        protocol_threats = data.get('protocol_threats', pd.DataFrame())
+        if not protocol_threats.empty and 'SRC_IP' in protocol_threats.columns:
+            for _, row in protocol_threats.iterrows():
+                src_ip = row.get('SRC_IP', '')
+                protocol = row.get('PROTOCOL', '')
+                if src_ip and src_ip != 'None' and protocol in ['SMB', 'RDP', 'SSH']:
+                    ip_map[src_ip]['sources'].add(source_id)
+                    ip_map[src_ip]['activities'].append(f"{protocol} Activity")
+                    ip_map[src_ip]['scores'].append(row.get('SCORE', 0))
+    
+    # Detect IPs active in multiple sources (lateral movement indicator)
+    for ip, info in ip_map.items():
+        if len(info['sources']) >= MIN_SOURCES_FOR_CORRELATION:
+            avg_score = sum(info['scores']) / len(info['scores']) if info['scores'] else 0
+            confidence = min(100, 75 + (len(info['sources']) * 8))
+            
+            rows.append({
+                'ATTACKER_IP': ip,
+                'SOURCES': ', '.join(sorted(info['sources'])),
+                'SOURCE_COUNT': len(info['sources']),
+                'ACTIVITIES': ', '.join(set(info['activities'][:5])),  # Top 5 unique activities
+                'AVG_THREAT_SCORE': round(avg_score, 1),
+                'CONFIDENCE_SCORE': confidence,
+                'TYPE': 'Cross-Network Lateral Movement'
+            })
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['ATTACKER_IP', 'SOURCES', 'SOURCE_COUNT', 'ACTIVITIES', 'AVG_THREAT_SCORE', 'CONFIDENCE_SCORE', 'TYPE'])
+
+
+def correlate_beacon_timing(source_data):
+    """
+    Detect synchronized C2 beacons across networks
+    
+    Identifies:
+    - Beacon synchronization patterns (shared C2 heartbeat)
+    - Coordinated bot check-ins
+    - Common command & control timing
+    
+    Args:
+        source_data: Dictionary of {source_id: detection_results}
+        
+    Returns:
+        DataFrame with beacon correlation scores
+    """
+    rows = []
+    
+    # Collect beacon detections from all sources
+    beacon_map = defaultdict(lambda: {'sources': set(), 'intervals': [], 'destinations': set()})
+    
+    for source_id, data in source_data.items():
+        beacon_detections = data.get('beacon', pd.DataFrame())
+        if beacon_detections.empty:
+            continue
+            
+        for _, row in beacon_detections.iterrows():
+            dst_ip = row.get('DST_IP', '')
+            interval = row.get('AVG_INTERVAL', 0)
+            
+            if dst_ip and interval > 0:
+                # Group by destination and similar interval (within 10% tolerance)
+                interval_bucket = int(interval / 10) * 10  # Round to nearest 10 seconds
+                key = f"{dst_ip}_{interval_bucket}"
+                
+                beacon_map[key]['sources'].add(source_id)
+                beacon_map[key]['intervals'].append(interval)
+                beacon_map[key]['destinations'].add(dst_ip)
+    
+    # Find beacons with synchronized timing across sources
+    for beacon_key, info in beacon_map.items():
+        if len(info['sources']) >= MIN_SOURCES_FOR_CORRELATION:
+            avg_interval = sum(info['intervals']) / len(info['intervals']) if info['intervals'] else 0
+            confidence = min(100, 80 + (len(info['sources']) * 6))
+            
+            rows.append({
+                'BEACON_DESTINATION': list(info['destinations'])[0],
+                'AVG_INTERVAL': round(avg_interval, 1),
+                'SOURCES': ', '.join(sorted(info['sources'])),
+                'SOURCE_COUNT': len(info['sources']),
+                'CONFIDENCE_SCORE': confidence,
+                'TYPE': 'Synchronized C2 Beacon'
+            })
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['BEACON_DESTINATION', 'AVG_INTERVAL', 'SOURCES', 'SOURCE_COUNT', 'CONFIDENCE_SCORE', 'TYPE'])
+
+
+# -----------------------
 # Pipeline
 # -----------------------
-def pipeline(pcap=FILE_PCAP):
+def pipeline(pcap_sources=None):
+    """
+    Main analysis pipeline supporting multi-source PCAP correlation
+    
+    Args:
+        pcap_sources: List of tuples [(source_id, pcap_path), ...]
+                     or single string for backward compatibility
+                     or None to use default FILE_PCAP
+    """
     try:
         print("\n=== Stability v22.0: ML-Enhanced DDoS & C2 Detection with Priority 3 Protocol Coverage ===\n")
+        
+        # Backward compatibility: handle single file or None
+        if isinstance(pcap_sources, str):
+            # Single file path provided
+            pcap_sources = [('default', pcap_sources)]
+        elif pcap_sources is None:
+            # No argument provided, use default
+            pcap_sources = [('default', FILE_PCAP)]
+        elif not isinstance(pcap_sources, list):
+            # Invalid input
+            print("[ERROR] pcap_sources must be a list of tuples, a string, or None")
+            return
+        
+        print(f"[INFO] Processing {len(pcap_sources)} source(s)")
         
         if ML_AVAILABLE and ML_ENABLED:
             print("[INFO] ML-enhanced detection enabled")
         else:
             print("[INFO] ML-enhanced detection disabled - using heuristics only")
 
-        print("[1/20] Parsing PCAP (enhanced for payload detection)...")
-        dns, tcp, http, tls, udp, icmp, dns_detail = parse_streams(pcap)
+        # Process each source and collect results
+        source_results = {}
+        all_dns = []
+        all_tcp = []
+        all_http = []
+        all_tls = []
+        all_udp = []
+        all_icmp = []
+        all_dns_detail = []
+        
+        for source_id, pcap_path in pcap_sources:
+            print(f"\n[Processing Source: {source_id}]")
+            print(f"[1/20] Parsing PCAP: {pcap_path}")
+            dns, tcp, http, tls, udp, icmp, dns_detail = parse_streams(pcap_path, source_id)
+            
+            # Store individual source data for correlation
+            source_results[source_id] = {
+                'dns': dns,
+                'tcp': tcp,
+                'http': http,
+                'tls': tls,
+                'udp': udp,
+                'icmp': icmp,
+                'dns_detail': dns_detail,
+                'pcap_path': pcap_path
+            }
+            
+            # Aggregate all sources for combined dashboard
+            all_dns.append(dns)
+            all_tcp.append(tcp)
+            all_http.append(http)
+            all_tls.append(tls)
+            all_udp.append(udp)
+            all_icmp.append(icmp)
+            all_dns_detail.append(dns_detail)
+        
+        # Combine all sources for unified analysis
+        dns = pd.concat(all_dns, ignore_index=True) if all_dns else pd.DataFrame()
+        tcp = pd.concat(all_tcp, ignore_index=True) if all_tcp else pd.DataFrame()
+        http = pd.concat(all_http, ignore_index=True) if all_http else pd.DataFrame()
+        tls = pd.concat(all_tls, ignore_index=True) if all_tls else pd.DataFrame()
+        udp = pd.concat(all_udp, ignore_index=True) if all_udp else pd.DataFrame()
+        icmp = pd.concat(all_icmp, ignore_index=True) if all_icmp else pd.DataFrame()
+        dns_detail = pd.concat(all_dns_detail, ignore_index=True) if all_dns_detail else pd.DataFrame()
+        
+        # Get first pcap path for display purposes (backward compatibility)
+        pcap = pcap_sources[0][1] if pcap_sources else FILE_PCAP
 
-        print("[2/20] Aggregating DNS...")
+        print("\n[2/20] Aggregating DNS...")
         dnsA = agg(dns, ['DOMAIN'])
 
         print("[3/20] Aggregating HTTP...")
@@ -4731,8 +5119,58 @@ def pipeline(pcap=FILE_PCAP):
         print("[27/30] Computing protocol threat aggregation...")
         protocol_threats = compute_protocol_threats(smb_df, rdp_df, ssh_df, ftp_df, smtp_df, irc_df, p2p_df)
         print(f"  - Protocol threats: {len(protocol_threats)}")
+        
+        # Store detection results for each source for correlation
+        for source_id in source_results:
+            source_results[source_id]['c2_full'] = c2_full
+            source_results[source_id]['ddos'] = ddos
+            source_results[source_id]['beacon'] = beacon
+            source_results[source_id]['protocol_threats'] = protocol_threats
+        
+        # ✅ MULTI-SOURCE CORRELATION
+        correlation_results = {
+            'c2': pd.DataFrame(),
+            'attacks': pd.DataFrame(),
+            'lateral': pd.DataFrame(),
+            'beacons': pd.DataFrame()
+        }
+        
+        if MULTI_SOURCE_ENABLED and len(source_results) >= MIN_SOURCES_FOR_CORRELATION:
+            print("\n[CORRELATION] Analyzing cross-source patterns...")
+            print(f"[28/34] Correlating C2 infrastructure across {len(source_results)} sources...")
+            correlation_results['c2'] = correlate_cross_source_c2(source_results)
+            if not correlation_results['c2'].empty:
+                print(f"  - Found {len(correlation_results['c2'])} shared C2 indicators")
+            
+            print("[29/34] Correlating attack patterns...")
+            correlation_results['attacks'] = correlate_attack_patterns(source_results)
+            if not correlation_results['attacks'].empty:
+                print(f"  - Found {len(correlation_results['attacks'])} coordinated attacks")
+            
+            print("[30/34] Detecting lateral movement across sources...")
+            correlation_results['lateral'] = detect_lateral_movement_across_sources(source_results)
+            if not correlation_results['lateral'].empty:
+                print(f"  - Found {len(correlation_results['lateral'])} cross-network movements")
+            
+            print("[31/34] Correlating beacon timing...")
+            correlation_results['beacons'] = correlate_beacon_timing(source_results)
+            if not correlation_results['beacons'].empty:
+                print(f"  - Found {len(correlation_results['beacons'])} synchronized beacons")
+        elif len(source_results) < MIN_SOURCES_FOR_CORRELATION:
+            print(f"\n[INFO] Multi-source correlation requires at least {MIN_SOURCES_FOR_CORRELATION} sources (have {len(source_results)})")
+        
+        # Prepare source metadata for dashboard
+        source_metadata = [
+            {
+                'SOURCE_ID': sid,
+                'PCAP_FILE': os.path.basename(sdata['pcap_path']),
+                'PACKETS': len(sdata['tcp']) + len(sdata['udp']) + len(sdata['icmp']),
+                'PROTOCOLS': ', '.join(['TCP', 'UDP', 'ICMP', 'DNS', 'HTTP', 'TLS'][:3])
+            }
+            for sid, sdata in source_results.items()
+        ]
 
-        print("[28/30] Writing dashboard.js and dashboard.html ...")
+        print("[32/34] Writing dashboard.js and dashboard.html ...")
         js = (
             JS_TEMPLATE
             .replace('%%DNS%%', safe_js_json(dnsA.to_dict(orient='records')))
@@ -4763,6 +5201,11 @@ def pipeline(pcap=FILE_PCAP):
             .replace('%%IRC%%', safe_js_json(irc_df.to_dict(orient='records') if not irc_df.empty else []))
             .replace('%%P2P%%', safe_js_json(p2p_df.to_dict(orient='records') if not p2p_df.empty else []))
             .replace('%%PROTOCOLTHREATS%%', safe_js_json(protocol_threats.to_dict(orient='records') if not protocol_threats.empty else []))
+            .replace('%%CORRELATION_C2%%', safe_js_json(correlation_results['c2'].to_dict(orient='records') if not correlation_results['c2'].empty else []))
+            .replace('%%CORRELATION_ATTACKS%%', safe_js_json(correlation_results['attacks'].to_dict(orient='records') if not correlation_results['attacks'].empty else []))
+            .replace('%%CORRELATION_LATERAL%%', safe_js_json(correlation_results['lateral'].to_dict(orient='records') if not correlation_results['lateral'].empty else []))
+            .replace('%%CORRELATION_BEACONS%%', safe_js_json(correlation_results['beacons'].to_dict(orient='records') if not correlation_results['beacons'].empty else []))
+            .replace('%%SOURCE_METADATA%%', safe_js_json(source_metadata))
         )
 
         with open('dashboard.js', 'w', encoding='utf-8') as jf:
@@ -4831,4 +5274,60 @@ def pipeline(pcap=FILE_PCAP):
 # Entry point
 # -----------------------
 if __name__ == '__main__':
-    pipeline()
+    # Parse command-line arguments for multi-source support
+    parser = argparse.ArgumentParser(
+        description='PCAP Analysis with Multi-Source Correlation Support',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  # Single file (backward compatible)
+  python main.py
+  
+  # Multiple sources
+  python main.py --sources monitor1:file1.pcap monitor2:file2.pcap monitor3:file3.pcap
+  
+  # Wildcard pattern
+  python main.py --sources-dir /path/to/pcaps/*.pcap
+        '''
+    )
+    
+    parser.add_argument(
+        '--sources',
+        nargs='+',
+        metavar='NAME:PATH',
+        help='Multiple PCAP sources in format name:path (e.g., monitor1:file1.pcap)'
+    )
+    
+    parser.add_argument(
+        '--sources-dir',
+        metavar='PATTERN',
+        help='Wildcard pattern for PCAP files (e.g., /pcaps/*.pcap)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Build pcap_sources list based on arguments
+    pcap_sources = None
+    
+    if args.sources:
+        # Parse sources in format "name:path"
+        pcap_sources = []
+        for source_spec in args.sources:
+            if ':' in source_spec:
+                name, path = source_spec.split(':', 1)
+                pcap_sources.append((name, path))
+            else:
+                # No name provided, use filename as name
+                pcap_sources.append((os.path.basename(source_spec), source_spec))
+    
+    elif args.sources_dir:
+        # Use glob pattern
+        files = glob.glob(args.sources_dir)
+        if files:
+            pcap_sources = [(os.path.basename(f), f) for f in sorted(files)]
+        else:
+            print(f"[WARNING] No files found matching pattern: {args.sources_dir}")
+            pcap_sources = None
+    
+    # Run pipeline
+    pipeline(pcap_sources)
