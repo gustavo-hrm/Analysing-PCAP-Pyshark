@@ -178,6 +178,47 @@ FLOW_TIMEOUT = 120                      # Flow idle timeout in seconds
 FLOW_MIN_PACKETS = 3                    # Minimum packets per flow for analysis
 
 # -----------------------
+# Protocol Analysis Configuration (Priority 3)
+# -----------------------
+PROTOCOL_ANALYSIS = {
+    'SMB': True,
+    'RDP': True,
+    'SSH': True,
+    'FTP': True,
+    'SMTP': True,
+    'IRC': True,
+    'P2P': True,
+}
+
+# Protocol port mappings
+PROTOCOL_PORTS = {
+    'SMB': [445, 139],
+    'RDP': [3389],
+    'SSH': [22],
+    'FTP': [20, 21],
+    'SMTP': [25, 587, 465],
+    'IRC': [6667, 6697, 194],
+    'P2P_BT': [6881, 6882, 6883, 6884, 6885],  # BitTorrent
+}
+
+# Protocol signatures for payload inspection
+PROTOCOL_SIGNATURES = {
+    'SMB': [b'\xffSMB', b'\xfeSMB'],  # SMBv1, SMBv2/3
+    'RDP': [b'\x03\x00\x00'],         # RDP Cookie
+    'SSH': [b'SSH-'],                 # SSH banner
+    'FTP': [b'220 ', b'USER ', b'PASS '],
+    'SMTP': [b'HELO ', b'EHLO ', b'MAIL FROM:'],
+    'IRC': [b'NICK ', b'JOIN ', b'PRIVMSG '],
+}
+
+# Protocol-specific thresholds
+SMB_LATERAL_THRESHOLD = 5       # Hosts accessed in 5 minutes
+RDP_BRUTE_THRESHOLD = 10        # Failed attempts
+SSH_BRUTE_THRESHOLD = 10        # Failed attempts
+FTP_EXFIL_SIZE = 10485760       # 10MB
+SMTP_MASS_MAIL_THRESHOLD = 50   # Emails per minute
+
+# -----------------------
 # Utilities
 # -----------------------
 def shannon_entropy(s):
@@ -2933,6 +2974,798 @@ def compute_ddos_heuristics(tcp_df, udp_df, icmp_df, http_df, dns_detail_df, c2_
         df = pd.concat([c2_ddos_corr, df], ignore_index=True)
     
     return df
+
+# -----------------------
+# Protocol Detection Functions (Priority 3)
+# -----------------------
+
+def detect_smb_activity(tcp_df):
+    """
+    Analyzes SMB traffic on ports 445, 139
+    
+    Detects:
+    - Lateral movement (one source → many destinations)
+    - Admin share access patterns
+    - SMBv1 usage (deprecated/vulnerable)
+    - Mass file access (ransomware indicator)
+    - Authentication failures
+    
+    Returns DataFrame with columns:
+    - SRC_IP, DST_IP, SMB_VERSION, SHARE_NAME, OPERATION
+    - LATERAL_MOVEMENT_SCORE, RANSOMWARE_INDICATOR
+    
+    References: RFC 1001, RFC 1002 (NetBIOS), MS-SMB, MS-SMB2
+    """
+    rows = []
+    
+    try:
+        if tcp_df.empty or 'SRC_PORT' not in tcp_df.columns or 'DST_PORT' not in tcp_df.columns:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','SMB_VERSION','SHARE_NAME','OPERATION','LATERAL_SCORE','RANSOMWARE_INDICATOR','COUNT'])
+        
+        # Filter SMB traffic (ports 445, 139)
+        smb_traffic = tcp_df[
+            (tcp_df['SRC_PORT'].isin([445, 139])) | 
+            (tcp_df['DST_PORT'].isin([445, 139]))
+        ].copy()
+        
+        if smb_traffic.empty:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','SMB_VERSION','SHARE_NAME','OPERATION','LATERAL_SCORE','RANSOMWARE_INDICATOR','COUNT'])
+        
+        # Analyze lateral movement: one source → multiple destinations
+        if 'SRC_IP' in smb_traffic.columns and 'DST_IP' in smb_traffic.columns:
+            lateral_analysis = smb_traffic.groupby('SRC_IP').agg({
+                'DST_IP': lambda x: x.nunique(),
+                'COUNT': 'sum' if 'COUNT' in smb_traffic.columns else 'size'
+            }).reset_index()
+            
+            lateral_analysis.columns = ['SRC_IP', 'TARGET_COUNT', 'PACKET_COUNT']
+            
+            # Detect payload signatures for SMB version
+            for src_ip in lateral_analysis['SRC_IP'].unique():
+                src_data = smb_traffic[smb_traffic['SRC_IP'] == src_ip]
+                target_count = lateral_analysis[lateral_analysis['SRC_IP'] == src_ip]['TARGET_COUNT'].values[0]
+                packet_count = lateral_analysis[lateral_analysis['SRC_IP'] == src_ip]['PACKET_COUNT'].values[0]
+                
+                # Check for SMB signatures in payload
+                smb_version = 'Unknown'
+                share_name = ''
+                operation = 'Connection'
+                
+                if 'PAYLOAD' in src_data.columns:
+                    for _, row in src_data.head(10).iterrows():
+                        payload = row.get('PAYLOAD', '')
+                        if isinstance(payload, str):
+                            if '\\xffSMB' in repr(payload) or 'SMB' in payload[:20]:
+                                smb_version = 'SMBv1'
+                            elif '\\xfeSMB' in repr(payload):
+                                smb_version = 'SMBv2/v3'
+                            
+                            # Detect admin shares
+                            if 'ADMIN$' in payload or 'C$' in payload or 'IPC$' in payload:
+                                share_name = 'ADMIN_SHARE'
+                                operation = 'Admin Share Access'
+                
+                # Calculate lateral movement score
+                lateral_score = 0
+                if target_count >= SMB_LATERAL_THRESHOLD:
+                    lateral_score = min(95, 60 + (target_count * 5))
+                elif target_count >= 3:
+                    lateral_score = 50
+                
+                # Ransomware indicator: many targets + high packet count
+                ransomware_indicator = 'No'
+                if target_count >= 10 and packet_count >= 50:
+                    ransomware_indicator = 'High Risk'
+                    lateral_score = min(98, lateral_score + 20)
+                elif target_count >= SMB_LATERAL_THRESHOLD:
+                    ransomware_indicator = 'Suspicious'
+                
+                # Flag SMBv1 usage (vulnerable)
+                if smb_version == 'SMBv1':
+                    lateral_score = min(95, lateral_score + 15)
+                    if ransomware_indicator == 'No':
+                        ransomware_indicator = 'SMBv1 Vulnerable'
+                
+                if lateral_score > 0 or target_count >= 3 or smb_version != 'Unknown':
+                    dst_ips = ', '.join(src_data['DST_IP'].unique()[:5].tolist())
+                    rows.append({
+                        'SRC_IP': src_ip,
+                        'DST_IP': dst_ips if len(dst_ips) <= 50 else dst_ips[:50] + '...',
+                        'SMB_VERSION': smb_version,
+                        'SHARE_NAME': share_name,
+                        'OPERATION': operation,
+                        'LATERAL_SCORE': lateral_score,
+                        'RANSOMWARE_INDICATOR': ransomware_indicator,
+                        'COUNT': int(target_count)
+                    })
+    
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['SRC_IP','DST_IP','SMB_VERSION','SHARE_NAME','OPERATION','LATERAL_SCORE','RANSOMWARE_INDICATOR','COUNT'])
+
+
+def detect_rdp_activity(tcp_df):
+    """
+    Analyzes RDP traffic on port 3389
+    
+    Detects:
+    - Brute force attempts (multiple failed logins)
+    - Off-hours connections
+    - Unusual session durations
+    - Multiple concurrent sessions
+    
+    Returns DataFrame with detection results
+    
+    References: RFC 2126, MS-RDPBCGR
+    """
+    rows = []
+    
+    try:
+        if tcp_df.empty or 'DST_PORT' not in tcp_df.columns:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','ATTEMPTS','STATUS','SCORE','PATTERN','COUNT'])
+        
+        # Filter RDP traffic (port 3389)
+        rdp_traffic = tcp_df[
+            (tcp_df['SRC_PORT'] == 3389) | 
+            (tcp_df['DST_PORT'] == 3389)
+        ].copy()
+        
+        if rdp_traffic.empty:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','ATTEMPTS','STATUS','SCORE','PATTERN','COUNT'])
+        
+        # Analyze connection patterns
+        if 'SRC_IP' in rdp_traffic.columns and 'DST_IP' in rdp_traffic.columns:
+            # Group by source IP to detect brute force
+            conn_analysis = rdp_traffic.groupby(['SRC_IP', 'DST_IP']).agg({
+                'COUNT': 'sum' if 'COUNT' in rdp_traffic.columns else 'size',
+                'TS': ['min', 'max', 'count'] if 'TS' in rdp_traffic.columns else 'count'
+            }).reset_index()
+            
+            for _, row in conn_analysis.iterrows():
+                src_ip = row['SRC_IP']
+                dst_ip = row['DST_IP']
+                
+                if isinstance(row['COUNT'], tuple):
+                    attempt_count = row['COUNT'][0] if len(row['COUNT']) > 0 else 0
+                else:
+                    attempt_count = row['COUNT']
+                
+                score = 0
+                status = 'Normal'
+                pattern = 'Single Connection'
+                
+                # Detect brute force: many connection attempts
+                if attempt_count >= RDP_BRUTE_THRESHOLD:
+                    score = min(95, 70 + (attempt_count - RDP_BRUTE_THRESHOLD) * 2)
+                    status = 'Brute Force Suspected'
+                    pattern = f'{attempt_count} attempts'
+                elif attempt_count >= 5:
+                    score = 50
+                    status = 'Multiple Attempts'
+                    pattern = f'{attempt_count} attempts'
+                
+                # Check for multiple sources to same target (credential stuffing)
+                target_sources = rdp_traffic[rdp_traffic['DST_IP'] == dst_ip]['SRC_IP'].nunique()
+                if target_sources >= 5:
+                    score = max(score, 80)
+                    status = 'Distributed Brute Force'
+                    pattern = f'{target_sources} sources'
+                
+                if score > 0 or attempt_count >= 3:
+                    rows.append({
+                        'SRC_IP': src_ip,
+                        'DST_IP': dst_ip,
+                        'ATTEMPTS': int(attempt_count),
+                        'STATUS': status,
+                        'SCORE': score,
+                        'PATTERN': pattern,
+                        'COUNT': int(attempt_count)
+                    })
+    
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['SRC_IP','DST_IP','ATTEMPTS','STATUS','SCORE','PATTERN','COUNT'])
+
+
+def detect_ssh_activity(tcp_df):
+    """
+    Analyzes SSH traffic on port 22
+    
+    Detects:
+    - Brute force attacks
+    - Tunnel establishment
+    - Failed login patterns
+    - Unusual client versions
+    
+    Returns DataFrame with SSH activity analysis
+    
+    References: RFC 4251 (SSH Protocol Architecture)
+    """
+    rows = []
+    
+    try:
+        if tcp_df.empty or 'DST_PORT' not in tcp_df.columns:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','ATTEMPTS','PATTERN','SCORE','VERSION','COUNT'])
+        
+        # Filter SSH traffic (port 22)
+        ssh_traffic = tcp_df[
+            (tcp_df['SRC_PORT'] == 22) | 
+            (tcp_df['DST_PORT'] == 22)
+        ].copy()
+        
+        if ssh_traffic.empty:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','ATTEMPTS','PATTERN','SCORE','VERSION','COUNT'])
+        
+        # Analyze connection patterns
+        if 'SRC_IP' in ssh_traffic.columns and 'DST_IP' in ssh_traffic.columns:
+            conn_analysis = ssh_traffic.groupby(['SRC_IP', 'DST_IP']).agg({
+                'COUNT': 'sum' if 'COUNT' in ssh_traffic.columns else 'size'
+            }).reset_index()
+            
+            for _, row in conn_analysis.iterrows():
+                src_ip = row['SRC_IP']
+                dst_ip = row['DST_IP']
+                attempt_count = row['COUNT']
+                
+                score = 0
+                pattern = 'Normal'
+                version = 'Unknown'
+                
+                # Extract SSH version from payload
+                if 'PAYLOAD' in ssh_traffic.columns:
+                    src_data = ssh_traffic[(ssh_traffic['SRC_IP'] == src_ip) & (ssh_traffic['DST_IP'] == dst_ip)]
+                    for _, pkt_row in src_data.head(5).iterrows():
+                        payload = pkt_row.get('PAYLOAD', '')
+                        if isinstance(payload, str) and 'SSH-' in payload[:50]:
+                            # Extract version from SSH banner
+                            if 'SSH-2.0' in payload:
+                                version = 'SSH-2.0'
+                            elif 'SSH-1' in payload:
+                                version = 'SSH-1.x (Deprecated)'
+                                score = max(score, 40)  # SSH-1 is deprecated/vulnerable
+                
+                # Detect brute force: many connection attempts
+                if attempt_count >= SSH_BRUTE_THRESHOLD:
+                    score = min(95, 70 + (attempt_count - SSH_BRUTE_THRESHOLD) * 2)
+                    pattern = f'Brute Force ({attempt_count} attempts)'
+                elif attempt_count >= 5:
+                    score = 50
+                    pattern = f'Multiple Attempts ({attempt_count})'
+                
+                # Check for scanning: one source → many targets
+                targets = ssh_traffic[ssh_traffic['SRC_IP'] == src_ip]['DST_IP'].nunique()
+                if targets >= 10:
+                    score = max(score, 85)
+                    pattern = f'SSH Scanning ({targets} targets)'
+                elif targets >= 5:
+                    score = max(score, 60)
+                    pattern = f'Port Scan ({targets} targets)'
+                
+                if score > 0 or attempt_count >= 3:
+                    rows.append({
+                        'SRC_IP': src_ip,
+                        'DST_IP': dst_ip,
+                        'ATTEMPTS': int(attempt_count),
+                        'PATTERN': pattern,
+                        'SCORE': score,
+                        'VERSION': version,
+                        'COUNT': int(attempt_count)
+                    })
+    
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['SRC_IP','DST_IP','ATTEMPTS','PATTERN','SCORE','VERSION','COUNT'])
+
+
+def detect_ftp_activity(tcp_df, udp_df):
+    """
+    Analyzes FTP/SFTP traffic
+    
+    Detects:
+    - Anonymous access attempts
+    - Large file transfers (> 10MB)
+    - Unusual upload patterns
+    - Credential brute forcing
+    
+    Returns DataFrame with FTP analysis
+    
+    References: RFC 959 (FTP), RFC 2228 (FTP Security Extensions)
+    """
+    rows = []
+    
+    try:
+        if tcp_df.empty or 'DST_PORT' not in tcp_df.columns:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','OPERATION','SIZE_MB','SCORE','PATTERN','COUNT'])
+        
+        # Filter FTP traffic (ports 20, 21)
+        ftp_traffic = tcp_df[
+            (tcp_df['SRC_PORT'].isin([20, 21])) | 
+            (tcp_df['DST_PORT'].isin([20, 21]))
+        ].copy()
+        
+        if ftp_traffic.empty:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','OPERATION','SIZE_MB','SCORE','PATTERN','COUNT'])
+        
+        # Analyze FTP sessions
+        if 'SRC_IP' in ftp_traffic.columns and 'DST_IP' in ftp_traffic.columns:
+            session_analysis = ftp_traffic.groupby(['SRC_IP', 'DST_IP']).agg({
+                'SIZE': 'sum' if 'SIZE' in ftp_traffic.columns else 'size',
+                'COUNT': 'sum' if 'COUNT' in ftp_traffic.columns else 'size'
+            }).reset_index()
+            
+            for _, row in session_analysis.iterrows():
+                src_ip = row['SRC_IP']
+                dst_ip = row['DST_IP']
+                total_size = row['SIZE'] if 'SIZE' in row else 0
+                packet_count = row['COUNT']
+                
+                size_mb = total_size / (1024 * 1024) if total_size > 0 else 0
+                score = 0
+                operation = 'Connection'
+                pattern = 'Normal'
+                
+                # Detect large file transfers (potential exfiltration)
+                if total_size >= FTP_EXFIL_SIZE:
+                    score = min(90, 60 + int((total_size / FTP_EXFIL_SIZE) * 10))
+                    operation = 'Large Transfer'
+                    pattern = f'Data Exfiltration ({size_mb:.1f} MB)'
+                
+                # Check for anonymous login in payload
+                if 'PAYLOAD' in ftp_traffic.columns:
+                    session_data = ftp_traffic[(ftp_traffic['SRC_IP'] == src_ip) & (ftp_traffic['DST_IP'] == dst_ip)]
+                    for _, pkt_row in session_data.head(10).iterrows():
+                        payload = pkt_row.get('PAYLOAD', '')
+                        if isinstance(payload, str):
+                            if 'USER anonymous' in payload or 'USER ftp' in payload:
+                                operation = 'Anonymous Login'
+                                score = max(score, 45)
+                                pattern = 'Anonymous Access'
+                            elif 'PASS ' in payload and packet_count >= 5:
+                                score = max(score, 55)
+                                pattern = 'Brute Force Attempt'
+                
+                # Multiple connection attempts
+                if packet_count >= 20:
+                    score = max(score, 50)
+                    if 'Brute Force' not in pattern:
+                        pattern = f'High Activity ({packet_count} packets)'
+                
+                if score > 0 or size_mb >= 5:
+                    rows.append({
+                        'SRC_IP': src_ip,
+                        'DST_IP': dst_ip,
+                        'OPERATION': operation,
+                        'SIZE_MB': round(size_mb, 2),
+                        'SCORE': score,
+                        'PATTERN': pattern,
+                        'COUNT': int(packet_count)
+                    })
+    
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['SRC_IP','DST_IP','OPERATION','SIZE_MB','SCORE','PATTERN','COUNT'])
+
+
+def detect_smtp_activity(tcp_df):
+    """
+    Analyzes SMTP traffic
+    
+    Detects:
+    - Mass mailing (spam botnet indicator)
+    - Internal hosts sending external email
+    - Large attachments
+    - Unusual recipient patterns
+    
+    Returns DataFrame with SMTP analysis
+    
+    References: RFC 5321 (SMTP), RFC 5322 (Internet Message Format)
+    """
+    rows = []
+    
+    try:
+        if tcp_df.empty or 'DST_PORT' not in tcp_df.columns:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','EMAIL_COUNT','PATTERN','SCORE','TYPE','COUNT'])
+        
+        # Filter SMTP traffic (ports 25, 587, 465)
+        smtp_traffic = tcp_df[
+            (tcp_df['SRC_PORT'].isin([25, 587, 465])) | 
+            (tcp_df['DST_PORT'].isin([25, 587, 465]))
+        ].copy()
+        
+        if smtp_traffic.empty:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','EMAIL_COUNT','PATTERN','SCORE','TYPE','COUNT'])
+        
+        # Analyze SMTP sessions
+        if 'SRC_IP' in smtp_traffic.columns and 'DST_IP' in smtp_traffic.columns:
+            # Count emails by analyzing MAIL FROM or RCPT TO commands
+            session_analysis = smtp_traffic.groupby('SRC_IP').agg({
+                'DST_IP': 'nunique',
+                'COUNT': 'sum' if 'COUNT' in smtp_traffic.columns else 'size'
+            }).reset_index()
+            
+            session_analysis.columns = ['SRC_IP', 'SERVER_COUNT', 'PACKET_COUNT']
+            
+            for _, row in session_analysis.iterrows():
+                src_ip = row['SRC_IP']
+                server_count = row['SERVER_COUNT']
+                packet_count = row['PACKET_COUNT']
+                
+                # Estimate email count from packet count (rough heuristic)
+                email_count = packet_count // 3  # Approximate: HELO, MAIL FROM, DATA per email
+                
+                score = 0
+                pattern = 'Normal'
+                email_type = 'Outbound'
+                
+                # Detect mass mailing (spam botnet)
+                if email_count >= SMTP_MASS_MAIL_THRESHOLD:
+                    score = min(95, 75 + (email_count - SMTP_MASS_MAIL_THRESHOLD))
+                    pattern = 'Mass Mailing (Spam Botnet)'
+                    email_type = 'Spam'
+                elif email_count >= 20:
+                    score = 60
+                    pattern = 'High Volume'
+                    email_type = 'Bulk Email'
+                
+                # Multiple SMTP servers (suspicious)
+                if server_count >= 5:
+                    score = max(score, 70)
+                    pattern = f'Multiple Servers ({server_count})'
+                    email_type = 'Distributed Spam'
+                
+                # Check if source is internal sending to external (compromised host)
+                if is_private_ip(src_ip):
+                    smtp_dests = smtp_traffic[smtp_traffic['SRC_IP'] == src_ip]['DST_IP'].unique()
+                    external_count = sum(1 for ip in smtp_dests if not is_private_ip(ip))
+                    if external_count >= 3 and email_count >= 10:
+                        score = max(score, 80)
+                        pattern = 'Internal → External Mass Mail'
+                        email_type = 'Compromised Host'
+                
+                if score > 0 or email_count >= 10:
+                    dst_ips = ', '.join(smtp_traffic[smtp_traffic['SRC_IP'] == src_ip]['DST_IP'].unique()[:3].tolist())
+                    rows.append({
+                        'SRC_IP': src_ip,
+                        'DST_IP': dst_ips if len(dst_ips) <= 50 else dst_ips[:50] + '...',
+                        'EMAIL_COUNT': int(email_count),
+                        'PATTERN': pattern,
+                        'SCORE': score,
+                        'TYPE': email_type,
+                        'COUNT': int(packet_count)
+                    })
+    
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['SRC_IP','DST_IP','EMAIL_COUNT','PATTERN','SCORE','TYPE','COUNT'])
+
+
+def detect_irc_activity(tcp_df):
+    """
+    Analyzes IRC traffic (legacy C2 protocol)
+    
+    Detects:
+    - IRC C2 channels
+    - DCC transfers
+    - Bot command patterns
+    - Channel JOIN/PART anomalies
+    
+    Returns DataFrame with IRC C2 indicators
+    
+    References: RFC 1459 (IRC Protocol), RFC 2810-2813 (IRC Extensions)
+    """
+    rows = []
+    
+    try:
+        if tcp_df.empty or 'DST_PORT' not in tcp_df.columns:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','CHANNEL','PATTERN','SCORE','TYPE','COUNT'])
+        
+        # Filter IRC traffic (ports 6667, 6697, 194)
+        irc_traffic = tcp_df[
+            (tcp_df['SRC_PORT'].isin([6667, 6697, 194])) | 
+            (tcp_df['DST_PORT'].isin([6667, 6697, 194]))
+        ].copy()
+        
+        if irc_traffic.empty:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','CHANNEL','PATTERN','SCORE','TYPE','COUNT'])
+        
+        # Analyze IRC connections
+        if 'SRC_IP' in irc_traffic.columns and 'DST_IP' in irc_traffic.columns:
+            conn_analysis = irc_traffic.groupby(['SRC_IP', 'DST_IP']).agg({
+                'COUNT': 'sum' if 'COUNT' in irc_traffic.columns else 'size'
+            }).reset_index()
+            
+            for _, row in conn_analysis.iterrows():
+                src_ip = row['SRC_IP']
+                dst_ip = row['DST_IP']
+                packet_count = row['COUNT']
+                
+                score = 0
+                pattern = 'IRC Connection'
+                channel = 'Unknown'
+                irc_type = 'Legacy Protocol'
+                
+                # IRC is mostly used by botnets now, so any IRC traffic is suspicious
+                score = 65  # Base score for IRC usage
+                
+                # Check payload for IRC commands
+                if 'PAYLOAD' in irc_traffic.columns:
+                    session_data = irc_traffic[(irc_traffic['SRC_IP'] == src_ip) & (irc_traffic['DST_IP'] == dst_ip)]
+                    for _, pkt_row in session_data.head(10).iterrows():
+                        payload = pkt_row.get('PAYLOAD', '')
+                        if isinstance(payload, str):
+                            if 'JOIN #' in payload:
+                                # Extract channel name
+                                import re
+                                channel_match = re.search(r'JOIN #(\S+)', payload)
+                                if channel_match:
+                                    channel = '#' + channel_match.group(1)
+                                score = max(score, 75)
+                                pattern = 'IRC C2 Channel'
+                                irc_type = 'Botnet C2'
+                            elif 'PRIVMSG' in payload:
+                                score = max(score, 80)
+                                pattern = 'IRC Commands'
+                                irc_type = 'C2 Commands'
+                            elif 'NICK ' in payload:
+                                score = max(score, 70)
+                                pattern = 'IRC Bot Registration'
+                            elif 'DCC SEND' in payload:
+                                score = 90
+                                pattern = 'DCC File Transfer (Malware Distribution)'
+                                irc_type = 'Malware Transfer'
+                
+                # Multiple bots connecting to same IRC server
+                server_clients = irc_traffic[irc_traffic['DST_IP'] == dst_ip]['SRC_IP'].nunique()
+                if server_clients >= 5:
+                    score = min(95, score + 15)
+                    pattern = f'IRC Botnet ({server_clients} bots)'
+                    irc_type = 'Botnet Infrastructure'
+                
+                if score > 0:
+                    rows.append({
+                        'SRC_IP': src_ip,
+                        'DST_IP': dst_ip,
+                        'CHANNEL': channel,
+                        'PATTERN': pattern,
+                        'SCORE': score,
+                        'TYPE': irc_type,
+                        'COUNT': int(packet_count)
+                    })
+    
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['SRC_IP','DST_IP','CHANNEL','PATTERN','SCORE','TYPE','COUNT'])
+
+
+def detect_p2p_activity(tcp_df, udp_df):
+    """
+    Analyzes P2P protocol traffic
+    
+    Detects:
+    - BitTorrent DHT (UDP port 6881)
+    - Peer-to-peer malware distribution
+    - Botnet peer discovery
+    - Unusual peer counts
+    
+    Returns DataFrame with P2P analysis
+    
+    References: BEP 5 (BitTorrent DHT Protocol)
+    """
+    rows = []
+    
+    try:
+        # Combine TCP and UDP for P2P analysis
+        p2p_traffic = pd.DataFrame()
+        
+        if not tcp_df.empty and 'DST_PORT' in tcp_df.columns:
+            tcp_p2p = tcp_df[
+                (tcp_df['SRC_PORT'].isin(PROTOCOL_PORTS['P2P_BT'])) | 
+                (tcp_df['DST_PORT'].isin(PROTOCOL_PORTS['P2P_BT']))
+            ].copy()
+            p2p_traffic = pd.concat([p2p_traffic, tcp_p2p], ignore_index=True)
+        
+        if not udp_df.empty and 'DST_PORT' in udp_df.columns:
+            udp_p2p = udp_df[
+                (udp_df['SRC_PORT'].isin(PROTOCOL_PORTS['P2P_BT'])) | 
+                (udp_df['DST_PORT'].isin(PROTOCOL_PORTS['P2P_BT']))
+            ].copy()
+            if 'COUNT' not in udp_p2p.columns:
+                udp_p2p['COUNT'] = 1
+            p2p_traffic = pd.concat([p2p_traffic, udp_p2p], ignore_index=True)
+        
+        if p2p_traffic.empty:
+            return pd.DataFrame(columns=['SRC_IP','DST_IP','PEER_COUNT','PROTOCOL','SCORE','PATTERN','COUNT'])
+        
+        # Analyze P2P connections
+        if 'SRC_IP' in p2p_traffic.columns and 'DST_IP' in p2p_traffic.columns:
+            peer_analysis = p2p_traffic.groupby('SRC_IP').agg({
+                'DST_IP': 'nunique',
+                'COUNT': 'sum' if 'COUNT' in p2p_traffic.columns else 'size'
+            }).reset_index()
+            
+            peer_analysis.columns = ['SRC_IP', 'PEER_COUNT', 'PACKET_COUNT']
+            
+            for _, row in peer_analysis.iterrows():
+                src_ip = row['SRC_IP']
+                peer_count = row['PEER_COUNT']
+                packet_count = row['PACKET_COUNT']
+                
+                score = 0
+                pattern = 'P2P Activity'
+                protocol = 'BitTorrent'
+                
+                # High peer count indicates P2P activity
+                if peer_count >= 20:
+                    score = min(85, 60 + peer_count)
+                    pattern = f'P2P Swarm ({peer_count} peers)'
+                elif peer_count >= 10:
+                    score = 50
+                    pattern = f'P2P Activity ({peer_count} peers)'
+                
+                # Check if internal host (potential compromised machine)
+                if is_private_ip(src_ip):
+                    external_peers = 0
+                    src_peers = p2p_traffic[p2p_traffic['SRC_IP'] == src_ip]['DST_IP'].unique()
+                    external_peers = sum(1 for ip in src_peers if not is_private_ip(ip))
+                    
+                    if external_peers >= 10:
+                        score = max(score, 75)
+                        pattern = 'Internal → P2P Network (Potential Malware)'
+                        protocol = 'P2P Malware Distribution'
+                
+                # High packet count with many peers (botnet peer discovery)
+                if peer_count >= 15 and packet_count >= 100:
+                    score = max(score, 80)
+                    pattern = 'P2P Botnet Discovery'
+                    protocol = 'Botnet P2P'
+                
+                if score > 0 or peer_count >= 5:
+                    dst_ips = ', '.join(p2p_traffic[p2p_traffic['SRC_IP'] == src_ip]['DST_IP'].unique()[:3].tolist())
+                    rows.append({
+                        'SRC_IP': src_ip,
+                        'DST_IP': dst_ips if len(dst_ips) <= 50 else dst_ips[:50] + '...',
+                        'PEER_COUNT': int(peer_count),
+                        'PROTOCOL': protocol,
+                        'SCORE': score,
+                        'PATTERN': pattern,
+                        'COUNT': int(packet_count)
+                    })
+    
+    except Exception:
+        pass
+    
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['SRC_IP','DST_IP','PEER_COUNT','PROTOCOL','SCORE','PATTERN','COUNT'])
+
+
+def compute_protocol_threats(smb_df, rdp_df, ssh_df, ftp_df, smtp_df, irc_df, p2p_df):
+    """
+    Aggregates threats across all protocols
+    
+    Returns unified threat DataFrame with:
+    - INDICATOR, TYPE, PROTOCOL, SCORE, COUNT, SRC_IP, DST_IP
+    """
+    threats = []
+    
+    try:
+        # SMB lateral movement and ransomware
+        if not smb_df.empty:
+            for _, row in smb_df.iterrows():
+                if row.get('LATERAL_SCORE', 0) >= 60:
+                    threats.append({
+                        'INDICATOR': f"{row['SRC_IP']} → SMB Lateral Movement",
+                        'TYPE': 'SMB Lateral Movement',
+                        'PROTOCOL': 'SMB',
+                        'SCORE': row['LATERAL_SCORE'],
+                        'COUNT': row.get('COUNT', 0),
+                        'SRC_IP': row['SRC_IP'],
+                        'DST_IP': row.get('DST_IP', '')
+                    })
+                if row.get('RANSOMWARE_INDICATOR') == 'High Risk':
+                    threats.append({
+                        'INDICATOR': f"{row['SRC_IP']} → Ransomware Activity",
+                        'TYPE': 'Ransomware Indicator',
+                        'PROTOCOL': 'SMB',
+                        'SCORE': 95,
+                        'COUNT': row.get('COUNT', 0),
+                        'SRC_IP': row['SRC_IP'],
+                        'DST_IP': row.get('DST_IP', '')
+                    })
+        
+        # RDP brute force
+        if not rdp_df.empty:
+            for _, row in rdp_df.iterrows():
+                if row.get('SCORE', 0) >= 70:
+                    threats.append({
+                        'INDICATOR': f"{row['SRC_IP']} → RDP {row.get('STATUS', 'Attack')}",
+                        'TYPE': 'RDP Brute Force',
+                        'PROTOCOL': 'RDP',
+                        'SCORE': row['SCORE'],
+                        'COUNT': row.get('ATTEMPTS', 0),
+                        'SRC_IP': row['SRC_IP'],
+                        'DST_IP': row.get('DST_IP', '')
+                    })
+        
+        # SSH brute force
+        if not ssh_df.empty:
+            for _, row in ssh_df.iterrows():
+                if row.get('SCORE', 0) >= 70:
+                    threats.append({
+                        'INDICATOR': f"{row['SRC_IP']} → SSH {row.get('PATTERN', 'Attack')}",
+                        'TYPE': 'SSH Brute Force/Scan',
+                        'PROTOCOL': 'SSH',
+                        'SCORE': row['SCORE'],
+                        'COUNT': row.get('ATTEMPTS', 0),
+                        'SRC_IP': row['SRC_IP'],
+                        'DST_IP': row.get('DST_IP', '')
+                    })
+        
+        # FTP exfiltration
+        if not ftp_df.empty:
+            for _, row in ftp_df.iterrows():
+                if row.get('SCORE', 0) >= 60:
+                    threats.append({
+                        'INDICATOR': f"{row['SRC_IP']} → FTP {row.get('PATTERN', 'Activity')}",
+                        'TYPE': 'FTP Data Exfiltration',
+                        'PROTOCOL': 'FTP',
+                        'SCORE': row['SCORE'],
+                        'COUNT': row.get('COUNT', 0),
+                        'SRC_IP': row['SRC_IP'],
+                        'DST_IP': row.get('DST_IP', '')
+                    })
+        
+        # SMTP spam
+        if not smtp_df.empty:
+            for _, row in smtp_df.iterrows():
+                if row.get('SCORE', 0) >= 75:
+                    threats.append({
+                        'INDICATOR': f"{row['SRC_IP']} → SMTP {row.get('TYPE', 'Spam')}",
+                        'TYPE': 'SMTP Spam Botnet',
+                        'PROTOCOL': 'SMTP',
+                        'SCORE': row['SCORE'],
+                        'COUNT': row.get('EMAIL_COUNT', 0),
+                        'SRC_IP': row['SRC_IP'],
+                        'DST_IP': row.get('DST_IP', '')
+                    })
+        
+        # IRC C2
+        if not irc_df.empty:
+            for _, row in irc_df.iterrows():
+                if row.get('SCORE', 0) >= 75:
+                    threats.append({
+                        'INDICATOR': f"{row['SRC_IP']} → IRC {row.get('TYPE', 'C2')}",
+                        'TYPE': 'IRC C2 Communication',
+                        'PROTOCOL': 'IRC',
+                        'SCORE': row['SCORE'],
+                        'COUNT': row.get('COUNT', 0),
+                        'SRC_IP': row['SRC_IP'],
+                        'DST_IP': row.get('DST_IP', '')
+                    })
+        
+        # P2P malware
+        if not p2p_df.empty:
+            for _, row in p2p_df.iterrows():
+                if row.get('SCORE', 0) >= 75:
+                    threats.append({
+                        'INDICATOR': f"{row['SRC_IP']} → P2P {row.get('PROTOCOL', 'Activity')}",
+                        'TYPE': 'P2P Malware Distribution',
+                        'PROTOCOL': 'P2P',
+                        'SCORE': row['SCORE'],
+                        'COUNT': row.get('PEER_COUNT', 0),
+                        'SRC_IP': row['SRC_IP'],
+                        'DST_IP': row.get('DST_IP', '')
+                    })
+    
+    except Exception:
+        pass
+    
+    return pd.DataFrame(threats) if threats else pd.DataFrame(columns=['INDICATOR','TYPE','PROTOCOL','SCORE','COUNT','SRC_IP','DST_IP'])
+
 # -----------------------
 # JS and HTML templates (embedded)
 # -----------------------
@@ -2979,6 +3812,16 @@ const slidingWindowsData = %%SLIDINGWINDOWS%%;
 const flowFeaturesData = %%FLOWFEATURES%%;
 const flowAnomaliesData = %%FLOWANOMALIES%%;
 const bidirectionalAnomaliesData = %%BIDIRECTIONALANOMALIES%%;
+
+// ✅ PRIORITY 3: Protocol Detection Data
+const smbData = %%SMB%%;
+const rdpData = %%RDP%%;
+const sshData = %%SSH%%;
+const ftpData = %%FTP%%;
+const smtpData = %%SMTP%%;
+const ircData = %%IRC%%;
+const p2pData = %%P2P%%;
+const protocolThreatsData = %%PROTOCOLTHREATS%%;
 
 
 // ------------------------------------------------------------
@@ -3176,6 +4019,55 @@ function updateDashboard(){
   if(document.querySelector('#tbl_bidirectional tbody')) {
     renderTableRows(document.querySelector('#tbl_bidirectional tbody'), bidirSlice,
       ['flow_id','src_ip','dst_ip','asymmetry_score','packet_ratio','byte_ratio','anomaly_type']);
+  }
+
+  // ✅ PRIORITY 3: Protocol Detection Tables
+  const smbSlice = (smbData||[]).filter(r=>(r.LATERAL_SCORE||0)>0).slice().sort((a,b)=>(b.LATERAL_SCORE||0)-(a.LATERAL_SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_smb tbody')) {
+    renderTableRows(document.querySelector('#tbl_smb tbody'), smbSlice,
+      ['SRC_IP','DST_IP','SMB_VERSION','OPERATION','LATERAL_SCORE','RANSOMWARE_INDICATOR','COUNT']);
+  }
+  
+  const rdpSlice = (rdpData||[]).filter(r=>(r.SCORE||0)>0).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_rdp tbody')) {
+    renderTableRows(document.querySelector('#tbl_rdp tbody'), rdpSlice,
+      ['SRC_IP','DST_IP','ATTEMPTS','STATUS','SCORE','PATTERN','COUNT']);
+  }
+  
+  const sshSlice = (sshData||[]).filter(r=>(r.SCORE||0)>0).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_ssh tbody')) {
+    renderTableRows(document.querySelector('#tbl_ssh tbody'), sshSlice,
+      ['SRC_IP','DST_IP','ATTEMPTS','PATTERN','SCORE','VERSION','COUNT']);
+  }
+  
+  const ftpSlice = (ftpData||[]).filter(r=>(r.SCORE||0)>0).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_ftp tbody')) {
+    renderTableRows(document.querySelector('#tbl_ftp tbody'), ftpSlice,
+      ['SRC_IP','DST_IP','OPERATION','SIZE_MB','SCORE','PATTERN','COUNT']);
+  }
+  
+  const smtpSlice = (smtpData||[]).filter(r=>(r.SCORE||0)>0).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_smtp tbody')) {
+    renderTableRows(document.querySelector('#tbl_smtp tbody'), smtpSlice,
+      ['SRC_IP','DST_IP','EMAIL_COUNT','TYPE','SCORE','PATTERN','COUNT']);
+  }
+  
+  const ircSlice = (ircData||[]).filter(r=>(r.SCORE||0)>0).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_irc tbody')) {
+    renderTableRows(document.querySelector('#tbl_irc tbody'), ircSlice,
+      ['SRC_IP','DST_IP','CHANNEL','TYPE','SCORE','PATTERN','COUNT']);
+  }
+  
+  const p2pSlice = (p2pData||[]).filter(r=>(r.SCORE||0)>0).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_p2p tbody')) {
+    renderTableRows(document.querySelector('#tbl_p2p tbody'), p2pSlice,
+      ['SRC_IP','DST_IP','PEER_COUNT','PROTOCOL','SCORE','PATTERN','COUNT']);
+  }
+  
+  const protocolThreatSlice = (protocolThreatsData||[]).filter(r=>(r.SCORE||0)>=60).slice().sort((a,b)=>(b.SCORE||0)-(a.SCORE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_protocol_threats tbody')) {
+    renderTableRows(document.querySelector('#tbl_protocol_threats tbody'), protocolThreatSlice,
+      ['INDICATOR','TYPE','PROTOCOL','SCORE','COUNT','SRC_IP']);
   }
 
   // ------------------------
@@ -3568,6 +4460,55 @@ button:hover {
   <div class='table-wrap'><table id='tbl_bidirectional' class='display'><thead><tr><th>Flow ID</th><th>SRC IP</th><th>DST IP</th><th>Asymmetry Score</th><th>Packet Ratio</th><th>Byte Ratio</th><th>Type</th></tr></thead><tbody></tbody></table></div>
 </div>
 
+<!-- ✅ PRIORITY 3: Protocol Detection Tables -->
+<div style='margin-top:18px' class='card'>
+  <h3>🔒 SMB/CIFS Activity Detection</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Detects lateral movement, ransomware, and admin share access (ports 445, 139)</p>
+  <div class='table-wrap'><table id='tbl_smb' class='display'><thead><tr><th>SRC IP</th><th>DST IP</th><th>SMB Version</th><th>Operation</th><th>Lateral Score</th><th>Ransomware</th><th>Targets</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>🖥️ RDP Activity Detection</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Detects brute force attacks and unauthorized remote access (port 3389)</p>
+  <div class='table-wrap'><table id='tbl_rdp' class='display'><thead><tr><th>SRC IP</th><th>DST IP</th><th>Attempts</th><th>Status</th><th>Score</th><th>Pattern</th><th>Count</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>🔐 SSH Activity Detection</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Detects brute force, tunneling, and scanning (port 22)</p>
+  <div class='table-wrap'><table id='tbl_ssh' class='display'><thead><tr><th>SRC IP</th><th>DST IP</th><th>Attempts</th><th>Pattern</th><th>Score</th><th>Version</th><th>Count</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>📁 FTP/SFTP Activity Detection</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Detects data exfiltration and unauthorized file access (ports 20, 21)</p>
+  <div class='table-wrap'><table id='tbl_ftp' class='display'><thead><tr><th>SRC IP</th><th>DST IP</th><th>Operation</th><th>Size (MB)</th><th>Score</th><th>Pattern</th><th>Count</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>📧 SMTP Activity Detection</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Detects spam botnets and email exfiltration (ports 25, 587, 465)</p>
+  <div class='table-wrap'><table id='tbl_smtp' class='display'><thead><tr><th>SRC IP</th><th>DST IP</th><th>Email Count</th><th>Type</th><th>Score</th><th>Pattern</th><th>Packets</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>💬 IRC Activity Detection</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Detects legacy C2 channels and botnet commands (ports 6667, 6697, 194)</p>
+  <div class='table-wrap'><table id='tbl_irc' class='display'><thead><tr><th>SRC IP</th><th>DST IP</th><th>Channel</th><th>Type</th><th>Score</th><th>Pattern</th><th>Count</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>🌐 P2P Protocol Detection</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Detects P2P malware distribution and botnet peer discovery (BitTorrent DHT)</p>
+  <div class='table-wrap'><table id='tbl_p2p' class='display'><thead><tr><th>SRC IP</th><th>DST IP</th><th>Peer Count</th><th>Protocol</th><th>Score</th><th>Pattern</th><th>Packets</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>⚠️ Protocol Threat Summary</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Aggregated high-severity threats detected across all protocols</p>
+  <div class='table-wrap'><table id='tbl_protocol_threats' class='display'><thead><tr><th>Indicator</th><th>Type</th><th>Protocol</th><th>Score</th><th>Count</th><th>SRC IP</th></tr></thead><tbody></tbody></table></div>
+</div>
+
 <div style='margin-top:18px' class='card'>
   <h3>Advanced Heuristics</h3>
   <div class='table-wrap'><table id='tbl_adv' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
@@ -3753,7 +4694,40 @@ def pipeline(pcap=FILE_PCAP):
         except Exception as e:
             print(f"  - Flow analysis error (non-fatal): {e}")
 
-        print("[20/24] Writing dashboard.js and dashboard.html ...")
+        # ✅ PRIORITY 3: Protocol Detection and Analysis
+        print("[20/30] Detecting SMB/CIFS activity...")
+        smb_df = detect_smb_activity(tcp)
+        print(f"  - SMB detections: {len(smb_df)}")
+        
+        print("[21/30] Detecting RDP activity...")
+        rdp_df = detect_rdp_activity(tcp)
+        print(f"  - RDP detections: {len(rdp_df)}")
+        
+        print("[22/30] Detecting SSH activity...")
+        ssh_df = detect_ssh_activity(tcp)
+        print(f"  - SSH detections: {len(ssh_df)}")
+        
+        print("[23/30] Detecting FTP/SFTP activity...")
+        ftp_df = detect_ftp_activity(tcp, udp)
+        print(f"  - FTP detections: {len(ftp_df)}")
+        
+        print("[24/30] Detecting SMTP activity...")
+        smtp_df = detect_smtp_activity(tcp)
+        print(f"  - SMTP detections: {len(smtp_df)}")
+        
+        print("[25/30] Detecting IRC activity...")
+        irc_df = detect_irc_activity(tcp)
+        print(f"  - IRC detections: {len(irc_df)}")
+        
+        print("[26/30] Detecting P2P protocol activity...")
+        p2p_df = detect_p2p_activity(tcp, udp)
+        print(f"  - P2P detections: {len(p2p_df)}")
+        
+        print("[27/30] Computing protocol threat aggregation...")
+        protocol_threats = compute_protocol_threats(smb_df, rdp_df, ssh_df, ftp_df, smtp_df, irc_df, p2p_df)
+        print(f"  - Protocol threats: {len(protocol_threats)}")
+
+        print("[28/30] Writing dashboard.js and dashboard.html ...")
         js = (
             JS_TEMPLATE
             .replace('%%DNS%%', safe_js_json(dnsA.to_dict(orient='records')))
@@ -3776,6 +4750,14 @@ def pipeline(pcap=FILE_PCAP):
             .replace('%%FLOWFEATURES%%', safe_js_json(flow_features.head(100).to_dict(orient='records') if not flow_features.empty else []))
             .replace('%%FLOWANOMALIES%%', safe_js_json(flow_anomalies.to_dict(orient='records') if not flow_anomalies.empty else []))
             .replace('%%BIDIRECTIONALANOMALIES%%', safe_js_json(bidirectional_anomalies.to_dict(orient='records') if not bidirectional_anomalies.empty else []))
+            .replace('%%SMB%%', safe_js_json(smb_df.to_dict(orient='records') if not smb_df.empty else []))
+            .replace('%%RDP%%', safe_js_json(rdp_df.to_dict(orient='records') if not rdp_df.empty else []))
+            .replace('%%SSH%%', safe_js_json(ssh_df.to_dict(orient='records') if not ssh_df.empty else []))
+            .replace('%%FTP%%', safe_js_json(ftp_df.to_dict(orient='records') if not ftp_df.empty else []))
+            .replace('%%SMTP%%', safe_js_json(smtp_df.to_dict(orient='records') if not smtp_df.empty else []))
+            .replace('%%IRC%%', safe_js_json(irc_df.to_dict(orient='records') if not irc_df.empty else []))
+            .replace('%%P2P%%', safe_js_json(p2p_df.to_dict(orient='records') if not p2p_df.empty else []))
+            .replace('%%PROTOCOLTHREATS%%', safe_js_json(protocol_threats.to_dict(orient='records') if not protocol_threats.empty else []))
         )
 
         with open('dashboard.js', 'w', encoding='utf-8') as jf:
@@ -3812,6 +4794,27 @@ def pipeline(pcap=FILE_PCAP):
             print(f"Flow Anomalies: {len(flow_anomalies)}")
             print(f"Bidirectional Anomalies: {len(bidirectional_anomalies)}")
         print("=" * 25)
+        
+        # Priority 3 summaries
+        print("\n=== Priority 3: Protocol Detection ===")
+        print(f"SMB Detections: {len(smb_df)}")
+        if not smb_df.empty:
+            high_risk = len(smb_df[smb_df['LATERAL_SCORE'] >= 70])
+            print(f"  - High Risk SMB Activity: {high_risk}")
+        print(f"RDP Detections: {len(rdp_df)}")
+        if not rdp_df.empty:
+            brute_force = len(rdp_df[rdp_df['SCORE'] >= 70])
+            print(f"  - RDP Brute Force: {brute_force}")
+        print(f"SSH Detections: {len(ssh_df)}")
+        if not ssh_df.empty:
+            attacks = len(ssh_df[ssh_df['SCORE'] >= 70])
+            print(f"  - SSH Attacks/Scans: {attacks}")
+        print(f"FTP Detections: {len(ftp_df)}")
+        print(f"SMTP Detections: {len(smtp_df)}")
+        print(f"IRC Detections: {len(irc_df)}")
+        print(f"P2P Detections: {len(p2p_df)}")
+        print(f"Total Protocol Threats (Score ≥ 60): {len(protocol_threats)}")
+        print("=" * 37)
 
 
     except Exception:
