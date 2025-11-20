@@ -3891,7 +3891,7 @@ const sourceMetadataData = %%SOURCE_METADATA%%;
 
 
 // ------------------------------------------------------------
-// Table rendering helper
+// Table rendering helper with custom formatting
 // ------------------------------------------------------------
 function renderTableRows(tbody, rows, cols){
   if(!tbody) return;
@@ -3900,8 +3900,53 @@ function renderTableRows(tbody, rows, cols){
     const tr = document.createElement('tr');
     cols.forEach(c=>{
       const td = document.createElement('td');
-      td.textContent = r[c] !== undefined ? r[c] : '';
-      td.title = td.textContent;  // Show full text on hover
+      
+      // Special formatting for severity column
+      if(c === 'SEVERITY' && r[c]) {
+        const severity = r[c];
+        const severityColors = {
+          'CRITICAL': '#dc2626',
+          'HIGH': '#ea580c',
+          'MEDIUM': '#eab308',
+          'LOW': '#10b981'
+        };
+        const severityIcons = {
+          'CRITICAL': '🔴',
+          'HIGH': '🟠',
+          'MEDIUM': '🟡',
+          'LOW': '🟢'
+        };
+        const badge = document.createElement('span');
+        badge.style.cssText = `
+          display:inline-block;
+          padding:2px 8px;
+          border-radius:4px;
+          font-size:9px;
+          font-weight:600;
+          color:white;
+          background:${severityColors[severity] || '#6b7280'};
+        `;
+        badge.textContent = `${severityIcons[severity] || ''} ${severity}`;
+        td.appendChild(badge);
+      }
+      // Special formatting for confidence column
+      else if(c === 'CONFIDENCE' && r[c] !== undefined) {
+        const conf = parseFloat(r[c]);
+        const confSpan = document.createElement('span');
+        let color = '#10b981'; // Green
+        if(conf >= 80) color = '#dc2626'; // Red (high confidence = threat)
+        else if(conf >= 60) color = '#ea580c'; // Orange
+        else if(conf >= 40) color = '#eab308'; // Yellow
+        confSpan.style.cssText = `font-weight:600;color:${color};`;
+        confSpan.textContent = conf.toFixed(0) + '%';
+        td.appendChild(confSpan);
+      }
+      // Default rendering
+      else {
+        td.textContent = r[c] !== undefined ? r[c] : '';
+        td.title = td.textContent;  // Show full text on hover
+      }
+      
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
@@ -4249,6 +4294,84 @@ function updateDashboard(){
   }catch(e){
     console.log('change points chart err', e);
   }
+  
+  // ✅ NEW: Botnet Detection Chart and Summary
+  try{
+    // Update summary counts
+    const botnetCountEl = document.getElementById('botnet_count');
+    const botnetCriticalEl = document.getElementById('botnet_critical');
+    const botnetHighEl = document.getElementById('botnet_high');
+    const botnetMediumEl = document.getElementById('botnet_medium');
+    
+    if(botnetCountEl && botnetData) {
+      const uniqueFamilies = [...new Set((botnetData||[]).map(d => d.FAMILY))];
+      botnetCountEl.textContent = uniqueFamilies.length;
+      botnetCountEl.style.color = uniqueFamilies.length > 0 ? '#9333ea' : '#10b981';
+      
+      // Count by severity
+      const criticalCount = (botnetData||[]).filter(d => d.SEVERITY === 'CRITICAL').length;
+      const highCount = (botnetData||[]).filter(d => d.SEVERITY === 'HIGH').length;
+      const mediumCount = (botnetData||[]).filter(d => d.SEVERITY === 'MEDIUM').length;
+      
+      if(botnetCriticalEl) botnetCriticalEl.textContent = criticalCount;
+      if(botnetHighEl) botnetHighEl.textContent = highCount;
+      if(botnetMediumEl) botnetMediumEl.textContent = mediumCount;
+    }
+    
+    // Create botnet family chart
+    const botnetCanvas = document.getElementById('chart_botnet');
+    if(botnetCanvas && botnetData && botnetData.length > 0){
+      // Aggregate by family
+      const familyMap = {};
+      (botnetData||[]).forEach(d => {
+        const family = d.FAMILY || 'Unknown';
+        familyMap[family] = (familyMap[family] || 0) + (d.COUNT || 1);
+      });
+      
+      const families = Object.keys(familyMap).slice(0, 10); // Top 10
+      const counts = families.map(f => familyMap[f]);
+      
+      // Color code by severity
+      const colors = families.map(family => {
+        const sample = (botnetData||[]).find(d => d.FAMILY === family);
+        const severity = sample ? sample.SEVERITY : 'MEDIUM';
+        if(severity === 'CRITICAL') return 'rgba(220, 38, 38, 0.8)';
+        if(severity === 'HIGH') return 'rgba(234, 88, 12, 0.8)';
+        if(severity === 'MEDIUM') return 'rgba(234, 179, 8, 0.8)';
+        return 'rgba(107, 114, 128, 0.8)';
+      });
+      
+      const ctx = prepareCanvas(botnetCanvas, 220);
+      if(ctx){
+        window._botnet = new Chart(ctx, {
+          type:'horizontalBar',
+          data:{
+            labels: families,
+            datasets:[{
+              label:'Detections',
+              data: counts,
+              backgroundColor: colors,
+              borderColor: colors.map(c => c.replace('0.8', '1')),
+              borderWidth: 1
+            }]
+          },
+          options:{
+            responsive:false,
+            animation:false,
+            legend:{ display:false },
+            scales:{
+              xAxes:[{ ticks:{ beginAtZero:true }, scaleLabel:{ display:true, labelString:'Count' } }],
+              yAxes:[{ scaleLabel:{ display:true, labelString:'Family' } }]
+            }
+          }
+        });
+      }
+    } else if(botnetCanvas) {
+      botnetCanvas.parentElement.innerHTML = '<p style="text-align:center;opacity:0.6;padding:40px">No botnet families detected</p>';
+    }
+  }catch(e){
+    console.log('botnet chart err', e);
+  }
 
   setTimeout(()=>{ try{ $('.display').DataTable().columns.adjust(false); }catch(e){} }, 80);
 }
@@ -4503,6 +4626,29 @@ button:hover {
     <div class='table-wrap'><table id='tbl_ddos' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
   </div>
   
+  <!-- ✅ NEW: Botnet Detection Summary Card -->
+  <div class='card'>
+    <h3>🦠 Botnet Detection Summary</h3>
+    <div style='padding:20px 0;text-align:center'>
+      <div style='font-size:32px;font-weight:bold;color:#9333ea' id='botnet_count'>0</div>
+      <div style='font-size:11px;color:#6b7280;margin-top:4px'>Families Detected</div>
+    </div>
+    <div style='display:flex;gap:15px;padding:10px 0;font-size:10px;'>
+      <div style='flex:1;text-align:center;'>
+        <div style='font-size:20px;font-weight:bold;color:#dc2626' id='botnet_critical'>0</div>
+        <div style='color:#6b7280;'>Critical</div>
+      </div>
+      <div style='flex:1;text-align:center;'>
+        <div style='font-size:20px;font-weight:bold;color:#ea580c' id='botnet_high'>0</div>
+        <div style='color:#6b7280;'>High</div>
+      </div>
+      <div style='flex:1;text-align:center;'>
+        <div style='font-size:20px;font-weight:bold;color:#eab308' id='botnet_medium'>0</div>
+        <div style='color:#6b7280;'>Medium</div>
+      </div>
+    </div>
+  </div>
+  
   <!-- ✅ NEW: ML Detection Summary Card -->
   <div class='card' style='grid-column: span 2;'>
     <h3>🤖 Machine Learning Detection Summary</h3>
@@ -4621,6 +4767,7 @@ button:hover {
 <div style='margin-top:18px' class='card'>
   <h3>🦠 Botnet Family Detection</h3>
   <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Known botnet families detected via payload signatures, JA3 fingerprints, ports, and behavior patterns</p>
+  <div class='chart-box'><canvas id='chart_botnet'></canvas></div>
   <div class='table-wrap'><table id='tbl_botnet' class='display'><thead><tr><th>Family</th><th>Category</th><th>Severity</th><th>Confidence</th><th>Protocol</th><th>Evidence</th><th>SRC IP</th><th>DST IP</th><th>Count</th></tr></thead><tbody></tbody></table></div>
 </div>
 
@@ -5356,26 +5503,78 @@ def pipeline(pcap_sources=None):
         print("=" * 37)
         
         # Botnet Family Detection summaries
-        print("\n=== Botnet Family Detection ===")
+        print("\n" + "=" * 60)
+        print("🦠 BOTNET FAMILY DETECTION")
+        print("=" * 60)
         if not botnet_detections.empty:
-            print(f"Total Botnet Detections: {len(botnet_detections)}")
+            print(f"📊 Total Detections: {len(botnet_detections)}")
             families = botnet_detections['FAMILY'].value_counts()
-            print(f"Families Detected: {len(families)}")
-            for family, count in families.items():
-                severity = botnet_detections[botnet_detections['FAMILY'] == family]['SEVERITY'].iloc[0]
-                avg_conf = botnet_detections[botnet_detections['FAMILY'] == family]['CONFIDENCE'].mean()
-                print(f"  - {family}: {count} detections (avg confidence: {avg_conf:.1f}%, severity: {severity})")
+            print(f"🔍 Unique Families: {len(families)}\n")
             
-            # High confidence detections
+            # Group by severity for better visualization
+            severity_groups = {
+                'CRITICAL': [],
+                'HIGH': [],
+                'MEDIUM': [],
+                'LOW': []
+            }
+            
+            for family, count in families.items():
+                family_data = botnet_detections[botnet_detections['FAMILY'] == family]
+                severity = family_data['SEVERITY'].iloc[0]
+                avg_conf = family_data['CONFIDENCE'].mean()
+                category = family_data['CATEGORY'].iloc[0]
+                protocols = ', '.join(family_data['PROTOCOL'].unique())
+                
+                severity_groups[severity].append({
+                    'family': family,
+                    'count': count,
+                    'confidence': avg_conf,
+                    'category': category,
+                    'protocols': protocols
+                })
+            
+            # Print by severity level
+            severity_icons = {
+                'CRITICAL': '🔴',
+                'HIGH': '🟠',
+                'MEDIUM': '🟡',
+                'LOW': '🟢'
+            }
+            
+            for severity in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']:
+                if severity_groups[severity]:
+                    print(f"\n{severity_icons[severity]} {severity} Severity:")
+                    for item in severity_groups[severity]:
+                        print(f"  ├─ {item['family']}")
+                        print(f"  │  ├─ Category: {item['category']}")
+                        print(f"  │  ├─ Detections: {item['count']}")
+                        print(f"  │  ├─ Avg Confidence: {item['confidence']:.1f}%")
+                        print(f"  │  └─ Protocols: {item['protocols']}")
+            
+            # High confidence summary
             high_conf = botnet_detections[botnet_detections['CONFIDENCE'] >= 80]
             if not high_conf.empty:
-                print(f"High Confidence Detections (≥80%): {len(high_conf)}")
+                print(f"\n⭐ High Confidence Detections (≥80%): {len(high_conf)}")
                 for family in high_conf['FAMILY'].unique():
                     family_high = high_conf[high_conf['FAMILY'] == family]
-                    print(f"  - {family}: {len(family_high)} high-confidence")
+                    max_conf = family_high['CONFIDENCE'].max()
+                    print(f"  └─ {family}: {len(family_high)} detection(s) (max: {max_conf:.1f}%)")
+            
+            # Protocol distribution
+            protocol_dist = {}
+            for proto_list in botnet_detections['PROTOCOL'].unique():
+                for proto in str(proto_list).split(','):
+                    proto = proto.strip()
+                    protocol_dist[proto] = protocol_dist.get(proto, 0) + 1
+            
+            if protocol_dist:
+                print(f"\n📡 Protocol Distribution:")
+                for proto, count in sorted(protocol_dist.items(), key=lambda x: x[1], reverse=True):
+                    print(f"  └─ {proto}: {count} detection(s)")
         else:
-            print("No botnet families detected in this capture")
-        print("=" * 31)
+            print("✅ No botnet families detected in this capture")
+        print("=" * 60)
 
 
     except Exception:
