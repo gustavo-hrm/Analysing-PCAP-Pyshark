@@ -23,6 +23,26 @@ from botnet_signatures import (
 
 
 # -----------------------
+# Helper Functions
+# -----------------------
+
+def _truncate_evidence(evidence_str, max_length=200):
+    """
+    Truncate evidence string to maximum length for dashboard readability
+    
+    Args:
+        evidence_str: Evidence string to truncate
+        max_length: Maximum length (default: 200)
+        
+    Returns:
+        Truncated string with ellipsis if needed
+    """
+    if len(evidence_str) <= max_length:
+        return evidence_str
+    return evidence_str[:max_length-3] + "..."
+
+
+# -----------------------
 # Core Detection Functions
 # -----------------------
 
@@ -51,7 +71,9 @@ def detect_botnet_in_payload(payload, src_ip, dst_ip, dst_port, ja3=None):
     else:
         payload_bytes = payload
     
+    # Convert to lowercase once for performance
     payload_str = payload_bytes.decode('latin-1', errors='ignore').lower()
+    payload_bytes_lower = payload_bytes.lower()
     
     # Check each botnet family
     for family, sig in BOTNET_SIGNATURES.items():
@@ -71,10 +93,10 @@ def detect_botnet_in_payload(payload, src_ip, dst_ip, dst_port, ja3=None):
             evidence.append(f"Port:{dst_port}")
             matches += 1
         
-        # Check payload patterns
+        # Check payload patterns (optimized)
         for pattern in sig.get("payload_patterns", []):
             if isinstance(pattern, bytes):
-                if pattern.lower() in payload_bytes.lower():
+                if pattern.lower() in payload_bytes_lower:
                     score += DETECTION_WEIGHTS["payload_pattern"]
                     evidence.append(f"Payload:'{pattern.decode('latin-1', errors='ignore')}'")
                     matches += 1
@@ -447,7 +469,7 @@ def aggregate_botnet_detections(tcp_det, http_det, tls_det, dns_det, irc_det):
         'SEVERITY': 'first',
         'CONFIDENCE': 'max',  # Highest confidence
         'SCORE': 'sum',       # Sum scores for multiple matches
-        'EVIDENCE': lambda x: ' & '.join(set(x)),  # Combine evidence
+        'EVIDENCE': lambda x: _truncate_evidence(' & '.join(set(x)), max_length=200),  # Combine and truncate evidence
         'MATCHES': 'sum',
         'DST_PORT': 'first',
         'JA3': 'first',

@@ -5171,7 +5171,7 @@ def pipeline(pcap_sources=None):
         print(f"  - Protocol threats: {len(protocol_threats)}")
         
         # ✅ NEW: Botnet Family Detection
-        print("[28/38] Detecting botnet families across protocols...")
+        print("[28/42] Detecting botnet families across protocols...")
         botnet_detections = pd.DataFrame()
         if BOTNET_DETECTION_AVAILABLE:
             try:
@@ -5192,8 +5192,7 @@ def pipeline(pcap_sources=None):
                 print(f"  - DNS botnet signatures: {len(botnet_dns)}")
                 
                 # Detect in IRC (filter TCP by IRC ports)
-                irc_ports = [6667, 6697, 194]
-                tcp_irc = tcp[tcp['DST_PORT'].isin(irc_ports)] if 'DST_PORT' in tcp.columns and not tcp.empty else pd.DataFrame()
+                tcp_irc = tcp[tcp['DST_PORT'].isin(PROTOCOL_PORTS['IRC'])] if 'DST_PORT' in tcp.columns and not tcp.empty else pd.DataFrame()
                 botnet_irc = detect_botnet_in_irc(tcp_irc)
                 print(f"  - IRC botnet signatures: {len(botnet_irc)}")
                 
