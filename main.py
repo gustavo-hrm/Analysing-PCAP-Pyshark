@@ -4420,57 +4420,145 @@ HTML_TEMPLATE = r"""<!doctype html>
 <script src='https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/vfs_fonts.js'></script>
 <script src='https://cdn.datatables.net/buttons/2.4.1/js/buttons.html5.min.js'></script>
 <style>
-:root{--card-h:220px}*{box-sizing:border-box}
-body{margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:#f5f7fa;color:#111;font-size:11px}
-.app{display:flex;min-height:100vh}
-.sidebar{width:240px;background:#0f1724;color:#fff;padding:18px;font-size:11px;flex-shrink:0}
-.content{flex:1;padding:18px;max-width:100%}
+:root{
+  --card-h:220px;
+  --primary-color:#6366f1;
+  --primary-dark:#4f46e5;
+  --success-color:#10b981;
+  --warning-color:#f59e0b;
+  --danger-color:#ef4444;
+  --info-color:#3b82f6;
+  --bg-light:#f8fafc;
+  --bg-dark:#0f172a;
+  --card-bg:#ffffff;
+  --text-primary:#0f172a;
+  --text-secondary:#64748b;
+  --border-color:#e2e8f0;
+  --shadow-sm:0 1px 3px rgba(0,0,0,0.05);
+  --shadow-md:0 4px 12px rgba(0,0,0,0.08);
+  --shadow-lg:0 8px 24px rgba(0,0,0,0.12);
+  --radius-sm:8px;
+  --radius-md:12px;
+  --radius-lg:16px;
+}
 
-/* ✅ 2-Column Grid Layout */
+*{box-sizing:border-box}
+
+body{
+  margin:0;
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background-attachment:fixed;
+  color:var(--text-primary);
+  font-size:11px;
+  line-height:1.6;
+}
+
+.app{
+  display:flex;
+  min-height:100vh;
+}
+
+.sidebar{
+  width:260px;
+  background:rgba(15, 23, 42, 0.95);
+  backdrop-filter:blur(12px);
+  color:#fff;
+  padding:24px;
+  font-size:11px;
+  flex-shrink:0;
+  box-shadow:var(--shadow-lg);
+  border-right:1px solid rgba(255,255,255,0.1);
+}
+
+.content{
+  flex:1;
+  padding:24px;
+  max-width:100%;
+  background:var(--bg-light);
+}
+
+/* ✅ Enhanced 2-Column Grid Layout */
 .card-grid{
   display:grid;
-  grid-template-columns:repeat(2, 1fr);  /* 2 equal columns */
-  gap:16px;
-  margin-bottom:16px;
+  grid-template-columns:repeat(auto-fit, minmax(480px, 1fr));
+  gap:20px;
+  margin-bottom:20px;
 }
 
 /* Responsive: 1 column on smaller screens */
-@media (max-width: 900px) {
+@media (max-width: 1024px) {
   .card-grid{
     grid-template-columns:1fr;
   }
 }
 
 .card{
-  background:#fff;
-  border-radius:12px;
-  padding:16px;
-  box-shadow:0 2px 8px rgba(0,0,0,0.06);
+  background:var(--card-bg);
+  border-radius:var(--radius-md);
+  padding:20px;
+  box-shadow:var(--shadow-md);
   display:flex;
   flex-direction:column;
+  transition:all 0.3s ease;
+  border:1px solid var(--border-color);
+}
+
+.card:hover{
+  box-shadow:var(--shadow-lg);
+  transform:translateY(-2px);
+}
+
+h1{
+  margin:0 0 24px 0;
+  font-size:28px;
+  font-weight:700;
+  background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;
+  background-clip:text;
 }
 
 h3{
-  margin:0 0 12px 0;
-  font-size:14px;
+  margin:0 0 16px 0;
+  font-size:15px;
   font-weight:600;
-  color:#1f2937;
+  color:var(--text-primary);
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+
+h3::before{
+  content:'';
+  display:inline-block;
+  width:4px;
+  height:20px;
+  background:linear-gradient(135deg, var(--primary-color), var(--primary-dark));
+  border-radius:2px;
 }
 
 .table-wrap{
   overflow-x:auto;
   margin-top:12px;
   flex:1;
+  border-radius:var(--radius-sm);
+  border:1px solid var(--border-color);
 }
 
 .display{
   width:100%;
   font-size:10px;
+  border-collapse:separate;
+  border-spacing:0;
 }
 
 .chart-box{
-  margin-bottom:12px;
+  margin-bottom:16px;
   height:200px;
+  background:linear-gradient(135deg, rgba(102, 126, 234, 0.05) 0%, rgba(118, 75, 162, 0.05) 100%);
+  border-radius:var(--radius-sm);
+  padding:12px;
 }
 
 canvas{
@@ -4485,111 +4573,239 @@ canvas{
   overflow-wrap:break-word;
   white-space:normal !important;
   font-size:10px;
+  padding:12px 10px;
+  border-bottom:1px solid var(--border-color);
 }
 
 .display th{
   font-size:10px;
   font-weight:600;
-  background:#f9fafb !important;
+  background:linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%) !important;
   position:sticky;
   top:0;
   z-index:10;
+  padding:12px 10px;
+  border-bottom:2px solid var(--primary-color);
+  color:var(--text-primary);
+}
+
+.display tbody tr{
+  transition:background 0.2s ease;
+}
+
+.display tbody tr:hover{
+  background:rgba(102, 126, 234, 0.05);
 }
 
 .display td.nowrap{
   white-space:nowrap;
 }
 
-/* Dark mode */
+/* Enhanced Dark mode */
 body.dark { 
-  background: #0b1116 !important; 
+  background:linear-gradient(135deg, #1e1b4b 0%, #312e81 100%) !important;
+  background-attachment:fixed;
   color: #e6eef6 !important; 
 }
 
+body.dark .content{
+  background:rgba(15, 23, 42, 0.6);
+}
+
 body.dark .sidebar { 
-  background:#060a0f !important; 
+  background:rgba(6, 10, 15, 0.95) !important;
   color:#e6eef6 !important; 
 }
 
 body.dark .card { 
-  background:#0e1620 !important; 
+  background:rgba(30, 41, 59, 0.95) !important;
   color:#e6eef6 !important; 
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4); 
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  border-color:rgba(255,255,255,0.1);
+}
+
+body.dark .card:hover{
+  box-shadow: 0 12px 32px rgba(0,0,0,0.6);
+}
+
+body.dark h1 {
+  background:linear-gradient(135deg, #818cf8 0%, #c084fc 100%);
+  -webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;
+  background-clip:text;
 }
 
 body.dark h3 {
   color: #f3f4f6;
 }
 
+body.dark h3::before{
+  background:linear-gradient(135deg, #818cf8, #c084fc);
+}
+
+body.dark .chart-box{
+  background:linear-gradient(135deg, rgba(129, 140, 248, 0.1) 0%, rgba(192, 132, 252, 0.1) 100%);
+}
+
 body.dark .display th { 
-  background: #1a1f2e !important;
-  color:#e5e7eb !important; 
+  background:linear-gradient(135deg, #1e293b 0%, #334155 100%) !important;
+  color:#e5e7eb !important;
+  border-bottom-color:#818cf8;
 }
 
 body.dark .display td { 
   color:#d1d5db !important; 
-  background: transparent !important; 
+  background: transparent !important;
+  border-bottom-color:rgba(255,255,255,0.1);
 }
 
-/* Input and button styling */
+body.dark .display tbody tr:hover{
+  background:rgba(129, 140, 248, 0.1);
+}
+
+body.dark .table-wrap{
+  border-color:rgba(255,255,255,0.1);
+}
+
+body.dark .content > div[style*='background:rgba(255,255,255,0.9)']{
+  background:rgba(30, 41, 59, 0.9) !important;
+  border-color:rgba(255,255,255,0.1) !important;
+}
+
+/* Enhanced Input and button styling */
 input[type="text"], select {
-  padding: 6px 10px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
   font-size: 11px;
   background: #fff;
+  transition:all 0.2s ease;
+}
+
+input[type="text"]:focus, select:focus {
+  outline:none;
+  border-color:var(--primary-color);
+  box-shadow:0 0 0 3px rgba(99, 102, 241, 0.1);
 }
 
 body.dark input[type="text"], body.dark select {
-  background: #1a1f2e;
-  border-color: #374151;
+  background: rgba(30, 41, 59, 0.8);
+  border-color: rgba(255,255,255,0.2);
   color: #e5e7eb;
 }
 
+body.dark input[type="text"]:focus, body.dark select:focus {
+  border-color:#818cf8;
+  box-shadow:0 0 0 3px rgba(129, 140, 248, 0.2);
+}
+
 button {
-  padding: 6px 12px;
+  padding: 8px 16px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
+  font-weight:600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.3s ease;
+  box-shadow:var(--shadow-sm);
 }
 
 button:hover {
-  opacity: 0.9;
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow:var(--shadow-md);
+}
+
+button:active {
+  transform: translateY(0);
 }
 
 #clear_filters {
-  background: #10b981;
+  background: linear-gradient(135deg, var(--success-color), #059669);
   color: #fff;
   width: 100%;
-  padding: 10px;
+  padding: 12px;
   font-weight: 600;
 }
 
 #darkToggle {
-  background: #6366f1;
+  background: linear-gradient(135deg, var(--primary-color), var(--primary-dark));
   color: #fff;
+}
+
+/* Stats badges */
+.stat-badge{
+  display:inline-block;
+  padding:4px 10px;
+  border-radius:12px;
+  font-size:10px;
+  font-weight:600;
+  background:linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(79, 70, 229, 0.1));
+  color:var(--primary-color);
+  border:1px solid rgba(99, 102, 241, 0.2);
+}
+
+body.dark .stat-badge{
+  background:linear-gradient(135deg, rgba(129, 140, 248, 0.2), rgba(99, 102, 241, 0.2));
+  color:#818cf8;
+  border-color:rgba(129, 140, 248, 0.3);
+}
+
+/* Loading animation */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.loading {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 </style>
 </head>
 <body>
 <div class='app'>
   <aside class='sidebar'>
-    <h2 style='margin:0 0 8px 0'>PCAP Dashboard</h2>
-    <div style='font-size:12px;opacity:0.9'>File: %%FILE%%</div>
-    <div style='margin-top:12px'><button id='clear_filters' style='padding:8px;border-radius:6px;background:#10b981;color:#fff;border:none;cursor:pointer'>Clear Filters</button></div>
+    <div style='text-align:center;margin-bottom:24px'>
+      <div style='font-size:32px;margin-bottom:8px'>🔍</div>
+      <h2 style='margin:0;font-size:16px;font-weight:700;background:linear-gradient(135deg, #818cf8, #c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>PCAP Dashboard</h2>
+      <div style='font-size:10px;opacity:0.7;margin-top:4px'>Security Analysis Platform</div>
+    </div>
+    <div style='background:rgba(255,255,255,0.05);padding:12px;border-radius:8px;margin-bottom:16px;border:1px solid rgba(255,255,255,0.1)'>
+      <div style='font-size:9px;opacity:0.7;margin-bottom:4px'>CAPTURE FILE</div>
+      <div style='font-size:11px;opacity:0.95;word-break:break-all'>%%FILE%%</div>
+    </div>
+    <div style='margin-top:20px'>
+      <button id='clear_filters' style='margin-bottom:12px'>🔄 Clear Filters</button>
+      <button id='darkToggle' style='width:100%'>🌙 Toggle Dark Mode</button>
+    </div>
+    <div style='margin-top:24px;padding-top:24px;border-top:1px solid rgba(255,255,255,0.1);font-size:9px;opacity:0.6;text-align:center'>
+      <div>Stability v23.0</div>
+      <div style='margin-top:4px'>Multi-Source Correlation</div>
+      <div style='margin-top:4px'>+ ML Detection</div>
+    </div>
   </aside>
   <main class='content'>
-    <h1 style='margin:0 0 12px 0'>PCAP Analysis Dashboard (Stability v23.0 - Multi-Source Correlation)</h1>
+    <h1 style='margin:0 0 8px 0'>Network Security Analysis Dashboard</h1>
+    <p style='color:var(--text-secondary);margin-bottom:24px;font-size:12px'>Real-time threat detection with machine learning and multi-protocol analysis</p>
 
-    <div style='margin-bottom:12px'>
-      <label>Source IP: <input id='filter_src' type='text'></label>
-      <label style='margin-left:12px'>Dest IP: <input id='filter_dst' type='text'></label>
-      <label style='margin-left:12px'>Domain/SNI: <input id='filter_dom' type='text'></label>
-      <label style='margin-left:12px'>Show Top: <select id='topN'><option value='15'>15</option><option value='25'>25</option><option value='50'>50</option><option value='99999'>All</option></select></label>
-      <button id='darkToggle' style='margin-left:12px'>Dark</button>
+    <div style='margin-bottom:20px;padding:16px;background:rgba(255,255,255,0.9);border-radius:var(--radius-md);box-shadow:var(--shadow-sm);border:1px solid var(--border-color)'>
+      <div style='display:flex;gap:12px;flex-wrap:wrap;align-items:center'>
+        <label style='display:flex;align-items:center;gap:6px'>
+          <span style='font-weight:600;font-size:10px'>Source IP:</span>
+          <input id='filter_src' type='text' placeholder='Filter by source...'>
+        </label>
+        <label style='display:flex;align-items:center;gap:6px'>
+          <span style='font-weight:600;font-size:10px'>Dest IP:</span>
+          <input id='filter_dst' type='text' placeholder='Filter by destination...'>
+        </label>
+        <label style='display:flex;align-items:center;gap:6px'>
+          <span style='font-weight:600;font-size:10px'>Domain/SNI:</span>
+          <input id='filter_dom' type='text' placeholder='Filter by domain...'>
+        </label>
+        <label style='display:flex;align-items:center;gap:6px'>
+          <span style='font-weight:600;font-size:10px'>Show Top:</span>
+          <select id='topN'><option value='15'>15</option><option value='25'>25</option><option value='50'>50</option><option value='99999'>All</option></select>
+        </label>
+      </div>
     </div>
 
     <div class='card-grid'>
@@ -4618,10 +4834,10 @@ button:hover {
   </div>
   
   <div class='card'>
-    <h3>DDoS Detection Summary</h3>
-    <div style='padding:20px 0;text-align:center'>
-      <div style='font-size:32px;font-weight:bold;color:#dc2626' id='ddos_count'>0</div>
-      <div style='font-size:11px;color:#6b7280;margin-top:4px'>Attacks Detected</div>
+    <h3>⚠️ DDoS Detection Summary</h3>
+    <div style='padding:24px 0;text-align:center;background:linear-gradient(135deg, rgba(239, 68, 68, 0.05), rgba(220, 38, 38, 0.05));border-radius:var(--radius-sm);margin-bottom:12px'>
+      <div style='font-size:48px;font-weight:bold;background:linear-gradient(135deg, #ef4444, #dc2626);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;' id='ddos_count'>0</div>
+      <div style='font-size:12px;color:var(--text-secondary);margin-top:6px;font-weight:600'>Attacks Detected</div>
     </div>
     <div class='table-wrap'><table id='tbl_ddos' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
   </div>
@@ -4629,22 +4845,22 @@ button:hover {
   <!-- ✅ NEW: Botnet Detection Summary Card -->
   <div class='card'>
     <h3>🦠 Botnet Detection Summary</h3>
-    <div style='padding:20px 0;text-align:center'>
-      <div style='font-size:32px;font-weight:bold;color:#9333ea' id='botnet_count'>0</div>
-      <div style='font-size:11px;color:#6b7280;margin-top:4px'>Families Detected</div>
+    <div style='padding:24px 0;text-align:center;background:linear-gradient(135deg, rgba(147, 51, 234, 0.05), rgba(126, 34, 206, 0.05));border-radius:var(--radius-sm);margin-bottom:12px'>
+      <div style='font-size:48px;font-weight:bold;background:linear-gradient(135deg, #9333ea, #7e22ce);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;' id='botnet_count'>0</div>
+      <div style='font-size:12px;color:var(--text-secondary);margin-top:6px;font-weight:600'>Families Detected</div>
     </div>
-    <div style='display:flex;gap:15px;padding:10px 0;font-size:10px;'>
-      <div style='flex:1;text-align:center;'>
-        <div style='font-size:20px;font-weight:bold;color:#dc2626' id='botnet_critical'>0</div>
-        <div style='color:#6b7280;'>Critical</div>
+    <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding:12px 0;'>
+      <div style='text-align:center;padding:12px;background:linear-gradient(135deg, rgba(239, 68, 68, 0.1), rgba(220, 38, 38, 0.1));border-radius:var(--radius-sm);'>
+        <div style='font-size:24px;font-weight:bold;color:#dc2626' id='botnet_critical'>0</div>
+        <div style='font-size:10px;color:var(--text-secondary);margin-top:4px;font-weight:600'>Critical</div>
       </div>
-      <div style='flex:1;text-align:center;'>
-        <div style='font-size:20px;font-weight:bold;color:#ea580c' id='botnet_high'>0</div>
-        <div style='color:#6b7280;'>High</div>
+      <div style='text-align:center;padding:12px;background:linear-gradient(135deg, rgba(234, 88, 12, 0.1), rgba(249, 115, 22, 0.1));border-radius:var(--radius-sm);'>
+        <div style='font-size:24px;font-weight:bold;color:#ea580c' id='botnet_high'>0</div>
+        <div style='font-size:10px;color:var(--text-secondary);margin-top:4px;font-weight:600'>High</div>
       </div>
-      <div style='flex:1;text-align:center;'>
-        <div style='font-size:20px;font-weight:bold;color:#eab308' id='botnet_medium'>0</div>
-        <div style='color:#6b7280;'>Medium</div>
+      <div style='text-align:center;padding:12px;background:linear-gradient(135deg, rgba(234, 179, 8, 0.1), rgba(250, 204, 21, 0.1));border-radius:var(--radius-sm);'>
+        <div style='font-size:24px;font-weight:bold;color:#eab308' id='botnet_medium'>0</div>
+        <div style='font-size:10px;color:var(--text-secondary);margin-top:4px;font-weight:600'>Medium</div>
       </div>
     </div>
   </div>
@@ -4652,19 +4868,33 @@ button:hover {
   <!-- ✅ NEW: ML Detection Summary Card -->
   <div class='card' style='grid-column: span 2;'>
     <h3>🤖 Machine Learning Detection Summary</h3>
-    <div style='display:flex;gap:20px;padding:15px 0;'>
-      <div style='flex:1;text-align:center;border-right:1px solid #e5e7eb;'>
-        <div style='font-size:28px;font-weight:bold;color:#8b5cf6' id='ml_count'>0</div>
-        <div style='font-size:10px;color:#6b7280;margin-top:4px'>ML Detections</div>
+    <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:16px 0;'>
+      <div style='text-align:center;padding:20px;background:linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(124, 58, 237, 0.1));border-radius:var(--radius-sm);border:1px solid rgba(139, 92, 246, 0.2)'>
+        <div style='font-size:36px;font-weight:bold;background:linear-gradient(135deg, #8b5cf6, #7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;' id='ml_count'>0</div>
+        <div style='font-size:11px;color:var(--text-secondary);margin-top:6px;font-weight:600'>ML Detections</div>
       </div>
-      <div style='flex:2;font-size:10px;color:#6b7280;'>
-        <div>✓ Random Forest Classifier for DDoS</div>
-        <div>✓ Isolation Forest for Anomalies</div>
-        <div>✓ Adaptive Baseline Thresholds</div>
-        <div>✓ Jitter-Tolerant Beaconing</div>
+      <div style='padding:16px;background:linear-gradient(135deg, rgba(59, 130, 246, 0.05), rgba(37, 99, 235, 0.05));border-radius:var(--radius-sm);border:1px solid rgba(59, 130, 246, 0.1)'>
+        <div style='font-size:10px;color:var(--text-secondary);line-height:1.8;'>
+          <div style='margin-bottom:6px'>✓ <strong>Random Forest</strong> DDoS</div>
+          <div style='margin-bottom:6px'>✓ <strong>Isolation Forest</strong> Anomalies</div>
+          <div>✓ <strong>Adaptive</strong> Baselines</div>
+        </div>
+      </div>
+      <div style='padding:16px;background:linear-gradient(135deg, rgba(16, 185, 129, 0.05), rgba(5, 150, 105, 0.05));border-radius:var(--radius-sm);border:1px solid rgba(16, 185, 129, 0.1)'>
+        <div style='font-size:10px;color:var(--text-secondary);line-height:1.8;'>
+          <div style='margin-bottom:6px'>📊 <strong>CUSUM</strong> Change Points</div>
+          <div style='margin-bottom:6px'>🌊 <strong>Flow</strong> Analysis</div>
+          <div>⇄ <strong>Bidirectional</strong> Flows</div>
+        </div>
       </div>
     </div>
   </div>
+</div>
+
+<!-- ✅ SECTION: Protocol Analysis -->
+<div style='margin:32px 0 20px;padding:12px 20px;background:linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(79, 70, 229, 0.1));border-left:4px solid var(--primary-color);border-radius:var(--radius-sm);'>
+  <h2 style='margin:0;font-size:16px;font-weight:700;color:var(--text-primary)'>📡 Network Protocol Analysis</h2>
+  <p style='margin:4px 0 0 0;font-size:11px;color:var(--text-secondary)'>Deep packet inspection across DNS, HTTP, TLS, and TCP protocols</p>
 </div>
 
 <!-- Continue with full-width sections below -->
@@ -4674,9 +4904,15 @@ button:hover {
 </div>
 
 <div style='margin-top:18px' class='card'>
-  <h3>TCP IP Distribution (All Protocols)</h3>
+  <h3>🌐 TCP IP Distribution (All Protocols)</h3>
   <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Scans all TCP payloads for IP address lists (detects C2 commands in raw TCP data)</p>
   <div class='table-wrap'><table id='tbl_tcp_ip' class='display'><thead><tr><th>SRC IP</th><th>SRC Port</th><th>DST IP</th><th>DST Port</th><th>IPs Found</th><th>IP Addresses</th><th>Payload Sample</th><th>Score</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<!-- ✅ SECTION: Machine Learning Detection -->
+<div style='margin:32px 0 20px;padding:12px 20px;background:linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(124, 58, 237, 0.1));border-left:4px solid #8b5cf6;border-radius:var(--radius-sm);'>
+  <h2 style='margin:0;font-size:16px;font-weight:700;color:var(--text-primary)'>🤖 Machine Learning Detection</h2>
+  <p style='margin:4px 0 0 0;font-size:11px;color:var(--text-secondary)'>Advanced ML algorithms for DDoS classification and anomaly detection</p>
 </div>
 
 <!-- ✅ NEW: ML DDoS Detection Section -->
@@ -4764,6 +5000,12 @@ button:hover {
   <div class='table-wrap'><table id='tbl_protocol_threats' class='display'><thead><tr><th>Indicator</th><th>Type</th><th>Protocol</th><th>Score</th><th>Count</th><th>SRC IP</th></tr></thead><tbody></tbody></table></div>
 </div>
 
+<!-- ✅ SECTION: Botnet & Malware Detection -->
+<div style='margin:32px 0 20px;padding:12px 20px;background:linear-gradient(135deg, rgba(147, 51, 234, 0.1), rgba(126, 34, 206, 0.1));border-left:4px solid #9333ea;border-radius:var(--radius-sm);'>
+  <h2 style='margin:0;font-size:16px;font-weight:700;color:var(--text-primary)'>🦠 Botnet & Malware Family Detection</h2>
+  <p style='margin:4px 0 0 0;font-size:11px;color:var(--text-secondary)'>Signature-based detection of known botnets, RATs, and C2 frameworks</p>
+</div>
+
 <div style='margin-top:18px' class='card'>
   <h3>🦠 Botnet Family Detection</h3>
   <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Known botnet families detected via payload signatures, JA3 fingerprints, ports, and behavior patterns</p>
@@ -4771,9 +5013,9 @@ button:hover {
   <div class='table-wrap'><table id='tbl_botnet' class='display'><thead><tr><th>Family</th><th>Category</th><th>Severity</th><th>Confidence</th><th>Protocol</th><th>Evidence</th><th>SRC IP</th><th>DST IP</th><th>Count</th></tr></thead><tbody></tbody></table></div>
 </div>
 
-<div style='margin-top:24px; padding:12px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius:8px;'>
-  <h2 style='color: white; margin: 0; font-size: 18px; text-align: center;'>🔗 Multi-Source Correlation Analysis</h2>
-  <p style='color: rgba(255,255,255,0.9); font-size: 11px; text-align: center; margin: 4px 0 0 0;'>Cross-network detection of coordinated attacks, shared infrastructure, and lateral movement</p>
+<div style='margin:32px 0 20px;padding:16px 24px;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);border-radius:var(--radius-md);box-shadow:var(--shadow-lg);'>
+  <h2 style='color: white; margin: 0; font-size: 18px; text-align: center; font-weight: 700;'>🔗 Multi-Source Correlation Analysis</h2>
+  <p style='color: rgba(255,255,255,0.95); font-size: 12px; text-align: center; margin: 6px 0 0 0;'>Cross-network detection of coordinated attacks, shared infrastructure, and lateral movement</p>
 </div>
 
 <div style='margin-top:18px' class='card'>
