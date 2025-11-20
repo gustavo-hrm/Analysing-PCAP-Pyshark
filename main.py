@@ -40,6 +40,24 @@ except ImportError:
     RandomForestClassifier = IsolationForest = StandardScaler = None
     stats = None
 
+# Botnet detection imports
+try:
+    from botnet_detector import (
+        detect_botnet_in_tcp,
+        detect_botnet_in_http,
+        detect_botnet_in_tls,
+        detect_botnet_in_dns,
+        detect_botnet_in_irc,
+        aggregate_botnet_detections,
+    )
+    BOTNET_DETECTION_AVAILABLE = True
+    print("[INFO] Botnet family detection enabled")
+except ImportError as e:
+    print(f"[WARNING] Botnet detection not available: {e}")
+    BOTNET_DETECTION_AVAILABLE = False
+    detect_botnet_in_tcp = detect_botnet_in_http = detect_botnet_in_tls = None
+    detect_botnet_in_dns = detect_botnet_in_irc = aggregate_botnet_detections = None
+
 # -----------------------
 # CONFIG
 # -----------------------
@@ -3861,6 +3879,9 @@ const ircData = %%IRC%%;
 const p2pData = %%P2P%%;
 const protocolThreatsData = %%PROTOCOLTHREATS%%;
 
+// ✅ NEW: Botnet Family Detection Data
+const botnetData = %%BOTNET%%;
+
 // ✅ MULTI-SOURCE CORRELATION DATA
 const correlationC2Data = %%CORRELATION_C2%%;
 const correlationAttacksData = %%CORRELATION_ATTACKS%%;
@@ -4113,6 +4134,13 @@ function updateDashboard(){
   if(document.querySelector('#tbl_protocol_threats tbody')) {
     renderTableRows(document.querySelector('#tbl_protocol_threats tbody'), protocolThreatSlice,
       ['INDICATOR','TYPE','PROTOCOL','SCORE','COUNT','SRC_IP']);
+  }
+  
+  // ✅ NEW: Botnet Family Detection Table
+  const botnetSlice = (botnetData||[]).filter(r=>(r.CONFIDENCE||0)>=50).slice().sort((a,b)=>(b.CONFIDENCE||0)-(a.CONFIDENCE||0)).slice(0,topN);
+  if(document.querySelector('#tbl_botnet tbody')) {
+    renderTableRows(document.querySelector('#tbl_botnet tbody'), botnetSlice,
+      ['FAMILY','CATEGORY','SEVERITY','CONFIDENCE','PROTOCOL','EVIDENCE','SRC_IP','DST_IP','COUNT']);
   }
   
   // ✅ MULTI-SOURCE CORRELATION TABLES
@@ -4588,6 +4616,12 @@ button:hover {
   <h3>⚠️ Protocol Threat Summary</h3>
   <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Aggregated high-severity threats detected across all protocols</p>
   <div class='table-wrap'><table id='tbl_protocol_threats' class='display'><thead><tr><th>Indicator</th><th>Type</th><th>Protocol</th><th>Score</th><th>Count</th><th>SRC IP</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>🦠 Botnet Family Detection</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Known botnet families detected via payload signatures, JA3 fingerprints, ports, and behavior patterns</p>
+  <div class='table-wrap'><table id='tbl_botnet' class='display'><thead><tr><th>Family</th><th>Category</th><th>Severity</th><th>Confidence</th><th>Protocol</th><th>Evidence</th><th>SRC IP</th><th>DST IP</th><th>Count</th></tr></thead><tbody></tbody></table></div>
 </div>
 
 <div style='margin-top:24px; padding:12px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius:8px;'>
@@ -5136,6 +5170,47 @@ def pipeline(pcap_sources=None):
         protocol_threats = compute_protocol_threats(smb_df, rdp_df, ssh_df, ftp_df, smtp_df, irc_df, p2p_df)
         print(f"  - Protocol threats: {len(protocol_threats)}")
         
+        # ✅ NEW: Botnet Family Detection
+        print("[28/38] Detecting botnet families across protocols...")
+        botnet_detections = pd.DataFrame()
+        if BOTNET_DETECTION_AVAILABLE:
+            try:
+                # Detect in TCP payloads
+                botnet_tcp = detect_botnet_in_tcp(tcp)
+                print(f"  - TCP botnet signatures: {len(botnet_tcp)}")
+                
+                # Detect in HTTP traffic
+                botnet_http = detect_botnet_in_http(http)
+                print(f"  - HTTP botnet signatures: {len(botnet_http)}")
+                
+                # Detect in TLS/JA3
+                botnet_tls = detect_botnet_in_tls(tls)
+                print(f"  - TLS/JA3 botnet signatures: {len(botnet_tls)}")
+                
+                # Detect in DNS
+                botnet_dns = detect_botnet_in_dns(dns)
+                print(f"  - DNS botnet signatures: {len(botnet_dns)}")
+                
+                # Detect in IRC (filter TCP by IRC ports)
+                irc_ports = [6667, 6697, 194]
+                tcp_irc = tcp[tcp['DST_PORT'].isin(irc_ports)] if 'DST_PORT' in tcp.columns and not tcp.empty else pd.DataFrame()
+                botnet_irc = detect_botnet_in_irc(tcp_irc)
+                print(f"  - IRC botnet signatures: {len(botnet_irc)}")
+                
+                # Aggregate all detections
+                botnet_detections = aggregate_botnet_detections(
+                    botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc
+                )
+                print(f"  - Total unique botnet detections: {len(botnet_detections)}")
+                if not botnet_detections.empty:
+                    families = botnet_detections['FAMILY'].unique()
+                    print(f"  - Families detected: {', '.join(families)}")
+            except Exception as e:
+                print(f"  - Botnet detection error (non-fatal): {e}")
+                botnet_detections = pd.DataFrame()
+        else:
+            print("  - Botnet detection disabled (module not loaded)")
+        
         # Store detection results for each source for correlation
         for source_id in source_results:
             source_results[source_id]['c2_full'] = c2_full
@@ -5153,22 +5228,22 @@ def pipeline(pcap_sources=None):
         
         if MULTI_SOURCE_ENABLED and len(source_results) >= MIN_SOURCES_FOR_CORRELATION:
             print("\n[CORRELATION] Analyzing cross-source patterns...")
-            print(f"[28/34] Correlating C2 infrastructure across {len(source_results)} sources...")
+            print(f"[29/42] Correlating C2 infrastructure across {len(source_results)} sources...")
             correlation_results['c2'] = correlate_cross_source_c2(source_results)
             if not correlation_results['c2'].empty:
                 print(f"  - Found {len(correlation_results['c2'])} shared C2 indicators")
             
-            print("[29/34] Correlating attack patterns...")
+            print("[30/42] Correlating attack patterns...")
             correlation_results['attacks'] = correlate_attack_patterns(source_results)
             if not correlation_results['attacks'].empty:
                 print(f"  - Found {len(correlation_results['attacks'])} coordinated attacks")
             
-            print("[30/34] Detecting lateral movement across sources...")
+            print("[31/42] Detecting lateral movement across sources...")
             correlation_results['lateral'] = detect_lateral_movement_across_sources(source_results)
             if not correlation_results['lateral'].empty:
                 print(f"  - Found {len(correlation_results['lateral'])} cross-network movements")
             
-            print("[31/34] Correlating beacon timing...")
+            print("[32/42] Correlating beacon timing...")
             correlation_results['beacons'] = correlate_beacon_timing(source_results)
             if not correlation_results['beacons'].empty:
                 print(f"  - Found {len(correlation_results['beacons'])} synchronized beacons")
@@ -5186,7 +5261,7 @@ def pipeline(pcap_sources=None):
             for sid, sdata in source_results.items()
         ]
 
-        print("[32/34] Writing dashboard.js and dashboard.html ...")
+        print("[33/42] Writing dashboard.js and dashboard.html ...")
         js = (
             JS_TEMPLATE
             .replace('%%DNS%%', safe_js_json(dnsA.to_dict(orient='records')))
@@ -5217,6 +5292,7 @@ def pipeline(pcap_sources=None):
             .replace('%%IRC%%', safe_js_json(irc_df.to_dict(orient='records') if not irc_df.empty else []))
             .replace('%%P2P%%', safe_js_json(p2p_df.to_dict(orient='records') if not p2p_df.empty else []))
             .replace('%%PROTOCOLTHREATS%%', safe_js_json(protocol_threats.to_dict(orient='records') if not protocol_threats.empty else []))
+            .replace('%%BOTNET%%', safe_js_json(botnet_detections.to_dict(orient='records') if not botnet_detections.empty else []))
             .replace('%%CORRELATION_C2%%', safe_js_json(correlation_results['c2'].to_dict(orient='records') if not correlation_results['c2'].empty else []))
             .replace('%%CORRELATION_ATTACKS%%', safe_js_json(correlation_results['attacks'].to_dict(orient='records') if not correlation_results['attacks'].empty else []))
             .replace('%%CORRELATION_LATERAL%%', safe_js_json(correlation_results['lateral'].to_dict(orient='records') if not correlation_results['lateral'].empty else []))
@@ -5279,6 +5355,28 @@ def pipeline(pcap_sources=None):
         print(f"P2P Detections: {len(p2p_df)}")
         print(f"Total Protocol Threats (Score ≥ 60): {len(protocol_threats)}")
         print("=" * 37)
+        
+        # Botnet Family Detection summaries
+        print("\n=== Botnet Family Detection ===")
+        if not botnet_detections.empty:
+            print(f"Total Botnet Detections: {len(botnet_detections)}")
+            families = botnet_detections['FAMILY'].value_counts()
+            print(f"Families Detected: {len(families)}")
+            for family, count in families.items():
+                severity = botnet_detections[botnet_detections['FAMILY'] == family]['SEVERITY'].iloc[0]
+                avg_conf = botnet_detections[botnet_detections['FAMILY'] == family]['CONFIDENCE'].mean()
+                print(f"  - {family}: {count} detections (avg confidence: {avg_conf:.1f}%, severity: {severity})")
+            
+            # High confidence detections
+            high_conf = botnet_detections[botnet_detections['CONFIDENCE'] >= 80]
+            if not high_conf.empty:
+                print(f"High Confidence Detections (≥80%): {len(high_conf)}")
+                for family in high_conf['FAMILY'].unique():
+                    family_high = high_conf[high_conf['FAMILY'] == family]
+                    print(f"  - {family}: {len(family_high)} high-confidence")
+        else:
+            print("No botnet families detected in this capture")
+        print("=" * 31)
 
 
     except Exception:

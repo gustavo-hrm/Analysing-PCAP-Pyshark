@@ -302,6 +302,100 @@ Detection based on:
 - Known attack patterns (WannaCry, NotPetya, Mirai)
 - MITRE ATT&CK framework techniques
 - Industry best practices
+- Botnet family signatures (Emotet, TrickBot, Mirai, Cobalt Strike, Sliver, Qakbot, AsyncRAT, Meterpreter)
+
+## Botnet Family Detection
+
+### Overview
+The tool includes an extensible botnet family detection system that scans network traffic for known malware signatures, C2 patterns, and behavioral indicators across multiple protocols (TCP, HTTP, TLS/JA3, DNS, IRC).
+
+### Detected Families
+Currently includes signatures for:
+- **Emotet** - Banking trojan and malware loader
+- **TrickBot** - Banking trojan with lateral movement capabilities
+- **Mirai** - IoT botnet for DDoS attacks
+- **Cobalt Strike** - Post-exploitation framework (commercial tool, often abused)
+- **Sliver** - Open-source C2 framework
+- **Qakbot (QBot)** - Banking trojan with worm capabilities
+- **AsyncRAT** - Open-source remote access trojan
+- **Meterpreter** - Metasploit Framework payload
+- **Unknown_Botnet** - Generic placeholder for unknown families
+
+### Adding New Botnet Families
+
+To add a new botnet family to the detection system:
+
+1. **Edit `botnet_signatures.py`** - Add a new entry to the `BOTNET_SIGNATURES` dictionary:
+
+```python
+"NewBotnet": {
+    "description": "Description of the botnet/malware",
+    "family": "NewBotnet",
+    "category": "Trojan/Botnet/RAT/C2",
+    "ports": [8080, 443],  # Common C2 ports
+    "ja3_fingerprints": [
+        "abc123...",  # JA3 hash if known
+    ],
+    "payload_patterns": [
+        b"unique_string",  # Byte patterns in payloads
+        b"botnet_marker",
+    ],
+    "http_endpoints": [
+        "/gate.php",  # Common C2 endpoints
+        "/panel",
+    ],
+    "http_user_agents": [
+        "Mozilla/5.0 custom_ua",  # Specific User-Agents
+    ],
+    "dns_patterns": [
+        r".*\.suspicious-tld$",  # Regex for DNS queries
+    ],
+    "confidence_base": 85,  # Base confidence score (0-100)
+    "severity": "HIGH",  # HIGH, CRITICAL, MEDIUM, LOW
+},
+```
+
+2. **Signature Fields Explained:**
+   - `ports`: List of TCP/UDP ports commonly used by the botnet
+   - `ja3_fingerprints`: TLS client fingerprints (use JA3 hash)
+   - `payload_patterns`: Byte strings found in network payloads
+   - `http_endpoints`: URL paths used for C2 communication
+   - `http_user_agents`: Specific User-Agent strings
+   - `dns_patterns`: Regex patterns for DNS queries (C2 domains)
+   - `magic_bytes`: File headers or protocol magic numbers
+   - `beacon_intervals`: Common beacon timing (seconds)
+   - `confidence_base`: Starting confidence (adjusted by evidence)
+   - `severity`: CRITICAL, HIGH, MEDIUM, or LOW
+
+3. **Detection Scoring:**
+   - Multiple matching indicators increase confidence
+   - Evidence is logged for each detection
+   - Minimum detection threshold: 50% confidence
+
+4. **Test Your Signature:**
+```bash
+python3 botnet_signatures.py  # View all signatures
+python3 main.py  # Run analysis with new signature
+```
+
+### Threat Intelligence Feed Integration (TODO)
+
+**Planned Features:**
+- Automatic download of IOCs from open-source threat feeds
+- Integration with abuse.ch feeds (URLhaus, Feodo Tracker, Malware Bazaar)
+- AlienVault OTX integration
+- Emerging Threats ruleset support
+- Daily/hourly feed updates with local caching
+- Automatic signature merging
+
+**Implementation Roadmap:**
+1. Create `download_threat_intel_feeds()` function in `botnet_signatures.py`
+2. Add feed parsers for common formats (CSV, JSON, STIX)
+3. Implement local caching with TTL
+4. Add CLI options for feed management
+5. Scheduled updates via cron/systemd timer
+
+To contribute threat intelligence integration, see `botnet_signatures.py` TODO comments.
 
 ## Performance
 
