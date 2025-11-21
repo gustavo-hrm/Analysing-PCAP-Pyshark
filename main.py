@@ -58,6 +58,20 @@ except ImportError as e:
     detect_botnet_in_tcp = detect_botnet_in_http = detect_botnet_in_tls = None
     detect_botnet_in_dns = detect_botnet_in_irc = aggregate_botnet_detections = None
 
+# Enhanced C2 Detection imports
+ENHANCED_C2_AVAILABLE = False
+try:
+    from c2_detection_enhanced import (
+        enhance_c2_detection,
+        generate_host_summary_report,
+        generate_c2_conclusion_report
+    )
+    ENHANCED_C2_AVAILABLE = True
+    print("[INFO] Enhanced C2 detection with ASN/Threat Intel enabled")
+except ImportError as e:
+    print(f"[INFO] Enhanced C2 detection not available (optional): {e}")
+    enhance_c2_detection = generate_host_summary_report = generate_c2_conclusion_report = None
+
 # -----------------------
 # CONFIG
 # -----------------------
@@ -3840,6 +3854,9 @@ const tlsData       = %%TLS%%;
 const tcpData       = %%TCP%%;
 
 const c2FullData    = %%C2FULL%%;
+const c2EnhancedData = %%C2ENHANCED%%;
+const c2HostSummaryData = %%C2HOSTSUMMARY%%;
+const c2ConclusionData = %%C2CONCLUSION%%;
 
 const advData       = %%ADV%%;
 const beaconData    = %%BEACON%%;
@@ -4069,6 +4086,30 @@ function updateDashboard(){
     (c2FullData||[]).filter(ff).slice(0,topN),
     ['INDICATOR','TYPE','SCORE','COUNT']
   );
+
+  // ✅ NEW: Enhanced C2 Detection tables
+  if(document.querySelector('#tbl_c2_enhanced tbody')) {
+    const c2EnhancedSlice = (c2EnhancedData||[]).filter(ff).slice().sort((a,b)=>(b.ENHANCED_SCORE||0)-(a.ENHANCED_SCORE||0)).slice(0,topN);
+    renderTableRows(document.querySelector('#tbl_c2_enhanced tbody'), c2EnhancedSlice,
+      ['INDICATOR','TYPE','CLASSIFICATION','ENHANCED_SCORE','CONFIDENCE','DST_ASN','DST_ORG','CLOUD_PROVIDER',
+       'TI_MALICIOUS_IP','ANALYST_ACTION','PRIORITY']);
+  }
+  
+  if(document.querySelector('#tbl_c2_host_summary tbody')) {
+    const c2HostSlice = (c2HostSummaryData||[]).slice().sort((a,b)=>(b.AVG_CONFIDENCE||0)-(a.AVG_CONFIDENCE||0)).slice(0,topN);
+    renderTableRows(document.querySelector('#tbl_c2_host_summary tbody'), c2HostSlice,
+      ['SOURCE_HOST','NUM_C2_DESTINATIONS','HIGHEST_CLASSIFICATION','AVG_CONFIDENCE','C2_DESTINATIONS',
+       'PRIMARY_INDICATORS','RECOMMENDED_ACTION','PRIORITY','TOTAL_DETECTIONS']);
+  }
+  
+  // Display C2 Conclusion Summary
+  if(c2ConclusionData && c2ConclusionData.summary_stats) {
+    const stats = c2ConclusionData.summary_stats;
+    document.getElementById('c2_total_detections').textContent = stats.total_detections || 0;
+    document.getElementById('c2_confirmed').textContent = stats.confirmed_c2 || 0;
+    document.getElementById('c2_likely').textContent = stats.likely_c2 || 0;
+    document.getElementById('c2_needs_review').textContent = stats.needs_review || 0;
+  }
 
   renderTableRows(document.querySelector('#tbl_adv tbody'), (advData||[]).filter(ff).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT']);
   renderTableRows(document.querySelector('#tbl_beacon tbody'), (beaconData||[]).filter(ff).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT']);
@@ -5081,6 +5122,57 @@ body.dark .stat-badge{
   <div class='table-wrap'><table id='tbl_c2' class='display'><thead><tr><th>INDICATOR</th><th>TYPE</th><th>SCORE</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
 </div>
 
+<!-- ✅ NEW: Enhanced C2 Detection Section -->
+<div style='margin:32px 0 20px;padding:12px 20px;background:linear-gradient(135deg, rgba(220, 38, 38, 0.1), rgba(239, 68, 68, 0.1));border-left:4px solid #dc2626;border-radius:var(--radius-sm);'>
+  <h2 style='margin:0;font-size:16px;font-weight:700;color:var(--text-primary)'>🔍 Enhanced C2 Detection & Analysis</h2>
+  <p style='margin:4px 0 0 0;font-size:11px;color:var(--text-secondary)'>ASN enrichment, threat intelligence correlation, and flexible triage classification</p>
+</div>
+
+<!-- Enhanced C2 Summary Stats -->
+<div style='margin-top:18px' class='card'>
+  <h3>📊 C2 Detection Summary</h3>
+  <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:12px 0;'>
+    <div style='text-align:center;padding:12px;background:linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(37, 99, 235, 0.1));border-radius:var(--radius-sm);'>
+      <div style='font-size:24px;font-weight:bold;color:#3b82f6' id='c2_total_detections'>0</div>
+      <div style='font-size:10px;color:var(--text-secondary);margin-top:4px;font-weight:600'>Total Detections</div>
+    </div>
+    <div style='text-align:center;padding:12px;background:linear-gradient(135deg, rgba(239, 68, 68, 0.1), rgba(220, 38, 38, 0.1));border-radius:var(--radius-sm);'>
+      <div style='font-size:24px;font-weight:bold;color:#dc2626' id='c2_confirmed'>0</div>
+      <div style='font-size:10px;color:var(--text-secondary);margin-top:4px;font-weight:600'>Confirmed C2</div>
+    </div>
+    <div style='text-align:center;padding:12px;background:linear-gradient(135deg, rgba(234, 88, 12, 0.1), rgba(249, 115, 22, 0.1));border-radius:var(--radius-sm);'>
+      <div style='font-size:24px;font-weight:bold;color:#ea580c' id='c2_likely'>0</div>
+      <div style='font-size:10px;color:var(--text-secondary);margin-top:4px;font-weight:600'>Likely C2</div>
+    </div>
+    <div style='text-align:center;padding:12px;background:linear-gradient(135deg, rgba(234, 179, 8, 0.1), rgba(250, 204, 21, 0.1));border-radius:var(--radius-sm);'>
+      <div style='font-size:24px;font-weight:bold;color:#eab308' id='c2_needs_review'>0</div>
+      <div style='font-size:10px;color:var(--text-secondary);margin-top:4px;font-weight:600'>Needs Review</div>
+    </div>
+  </div>
+</div>
+
+<!-- Enhanced C2 Detections Table -->
+<div style='margin-top:18px' class='card'>
+  <h3>🎯 Enhanced C2 Detections (ASN/Threat Intel)</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>C2 detections enriched with ASN/organization data, threat intelligence, and flexible triage classification</p>
+  <div class='table-wrap'><table id='tbl_c2_enhanced' class='display'><thead><tr>
+    <th>Indicator</th><th>Type</th><th>Classification</th><th>Score</th><th>Confidence</th>
+    <th>ASN</th><th>Organization</th><th>Cloud</th><th>Malicious</th>
+    <th>Action</th><th>Priority</th>
+  </tr></thead><tbody></tbody></table></div>
+</div>
+
+<!-- Per-Host C2 Summary Table -->
+<div style='margin-top:18px' class='card'>
+  <h3>🖥️ Per-Host C2 Summary</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Aggregated C2 detections by infected host with analyst recommendations</p>
+  <div class='table-wrap'><table id='tbl_c2_host_summary' class='display'><thead><tr>
+    <th>Source Host</th><th>C2 Destinations</th><th>Classification</th><th>Avg Confidence</th>
+    <th>C2 IPs</th><th>Primary Indicators</th><th>Recommended Action</th>
+    <th>Priority</th><th>Detections</th>
+  </tr></thead><tbody></tbody></table></div>
+</div>
+
 <div style='margin-top:18px' class='card'>
   <h3>Pivot (Source → Destination)</h3>
   <div class='table-wrap'><table id='pivot' class='display'><thead><tr><th>SRC</th><th>DST</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
@@ -5451,6 +5543,29 @@ def pipeline(pcap_sources=None):
 
         print("[11/20] Computing full C2 heuristic indicators...")
         c2_full = compute_c2_heuristics(dnsA, httpA, tlsA, tcpA)
+        
+        # ✅ NEW: Enhanced C2 Detection with ASN/Threat Intel
+        c2_enhanced = pd.DataFrame()
+        c2_host_summary = pd.DataFrame()
+        c2_conclusion = {}
+        if ENHANCED_C2_AVAILABLE and not c2_full.empty:
+            print("[11b/20] Enhancing C2 detections with ASN/Threat Intelligence...")
+            try:
+                c2_enhanced = enhance_c2_detection(c2_full, protocol='Mixed')
+                print(f"  - Enhanced {len(c2_enhanced)} C2 detections")
+                
+                # Generate per-host summary
+                c2_host_summary = generate_host_summary_report(c2_enhanced)
+                print(f"  - Generated summaries for {len(c2_host_summary)} hosts")
+                
+                # Generate conclusion report
+                c2_conclusion = generate_c2_conclusion_report(c2_enhanced)
+                confirmed = c2_conclusion.get('summary_stats', {}).get('confirmed_c2', 0)
+                needs_review = c2_conclusion.get('summary_stats', {}).get('needs_review', 0)
+                print(f"  - Confirmed C2: {confirmed}, Needs Review: {needs_review}")
+            except Exception as e:
+                print(f"  - Enhanced C2 detection error (non-fatal): {e}")
+                c2_enhanced = c2_full.copy()  # Fallback to original
 
         print("[12/20] Computing Advanced Heuristics...")
         adv = compute_advanced_heuristics(dnsA, httpA, tlsA, tcpA, timeline_list)
@@ -5704,6 +5819,9 @@ def pipeline(pcap_sources=None):
             .replace('%%TLS%%', safe_js_json(tlsA.to_dict(orient='records')))
             .replace('%%TCP%%', safe_js_json(tcpA.to_dict(orient='records')))
             .replace('%%C2FULL%%', safe_js_json(c2_full.to_dict(orient='records')))
+            .replace('%%C2ENHANCED%%', safe_js_json(c2_enhanced.to_dict(orient='records') if not c2_enhanced.empty else []))
+            .replace('%%C2HOSTSUMMARY%%', safe_js_json(c2_host_summary.to_dict(orient='records') if not c2_host_summary.empty else []))
+            .replace('%%C2CONCLUSION%%', safe_js_json(c2_conclusion if c2_conclusion else {}))
             .replace('%%ADV%%', safe_js_json(adv.to_dict(orient='records')))
             .replace('%%BEACON%%', safe_js_json(beacon.to_dict(orient='records')))
             .replace('%%DNSTUNNEL%%', safe_js_json(dnstunnel.to_dict(orient='records')))
