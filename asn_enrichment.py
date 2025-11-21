@@ -14,6 +14,12 @@ Supports multiple data sources:
 
 """
 
+try:
+    open
+except NameError:
+    import io
+    open = io.open
+
 import json
 import os
 import time

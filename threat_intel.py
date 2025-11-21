@@ -13,6 +13,12 @@ Provides integration with threat intelligence feeds and APIs:
 Implements caching and rate limiting to minimize API calls.
 """
 
+try:
+    open
+except NameError:
+    import io
+    open = io.open
+
 import json
 import os
 import time
