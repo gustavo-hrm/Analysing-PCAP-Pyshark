@@ -20,7 +20,9 @@ import hashlib
 from collections import defaultdict
 
 # Cache configuration
-CACHE_FILE = '/tmp/threat_intel_cache.json'
+CACHE_DIR = os.path.expanduser('~/.cache/pcap_analysis')
+os.makedirs(CACHE_DIR, exist_ok=True)
+CACHE_FILE = os.path.join(CACHE_DIR, 'threat_intel_cache.json')
 CACHE_TTL_SECONDS = 3600  # 1 hour for threat intel (more dynamic)
 MAX_CACHE_ENTRIES = 5000
 
@@ -161,8 +163,8 @@ class ThreatIntelligence:
             'c2_indicators': set(),
         }
         
-        # Try loading from local file
-        ioc_file = '/tmp/local_iocs.json'
+        # Try loading from local file in cache directory
+        ioc_file = os.path.join(CACHE_DIR, 'local_iocs.json')
         if os.path.exists(ioc_file):
             try:
                 with open(ioc_file, 'r') as f:
@@ -218,6 +220,7 @@ class ThreatIntelligence:
         if self.api_keys.get('virustotal') and self.rate_limiter.can_call('virustotal', RATE_LIMITS['virustotal']):
             vt_result = self._check_virustotal_ip(ip)
             if vt_result and vt_result.get('detected'):
+                self.rate_limiter.record_call('virustotal')  # Record successful call
                 result['is_malicious'] = True
                 result['sources'].append('VirusTotal')
                 result['threat_score'] = max(result['threat_score'], vt_result.get('score', 70))
@@ -228,6 +231,7 @@ class ThreatIntelligence:
         if self.api_keys.get('abuseipdb') and self.rate_limiter.can_call('abuseipdb', RATE_LIMITS['abuseipdb']):
             abuse_result = self._check_abuseipdb(ip)
             if abuse_result and abuse_result.get('abuse_score', 0) > 50:
+                self.rate_limiter.record_call('abuseipdb')  # Record successful call
                 result['is_malicious'] = True
                 result['sources'].append('AbuseIPDB')
                 result['threat_score'] = max(result['threat_score'], abuse_result.get('abuse_score', 0))
@@ -238,6 +242,7 @@ class ThreatIntelligence:
         if self.api_keys.get('greynoise') and self.rate_limiter.can_call('greynoise', RATE_LIMITS['greynoise']):
             gn_result = self._check_greynoise(ip)
             if gn_result and gn_result.get('classification') == 'malicious':
+                self.rate_limiter.record_call('greynoise')  # Record successful call
                 result['is_malicious'] = True
                 result['sources'].append('GreyNoise')
                 result['threat_score'] = max(result['threat_score'], 75)
@@ -340,7 +345,7 @@ class ThreatIntelligence:
     
     def save_local_iocs(self):
         """Save local IOCs to disk"""
-        ioc_file = '/tmp/local_iocs.json'
+        ioc_file = os.path.join(CACHE_DIR, 'local_iocs.json')
         try:
             data = {
                 'ips': list(self.local_iocs['malicious_ips']),
@@ -349,6 +354,8 @@ class ThreatIntelligence:
             }
             with open(ioc_file, 'w') as f:
                 json.dump(data, f, indent=2)
+            # Set secure permissions (owner read/write only)
+            os.chmod(ioc_file, 0o600)
         except Exception as e:
             print(f"[Threat Intel] Failed to save IOCs: {e}")
 

@@ -23,7 +23,9 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 # Cache configuration
-CACHE_FILE = '/tmp/asn_cache.json'
+CACHE_DIR = os.path.expanduser('~/.cache/pcap_analysis')
+os.makedirs(CACHE_DIR, exist_ok=True)
+CACHE_FILE = os.path.join(CACHE_DIR, 'asn_cache.json')
 CACHE_TTL_SECONDS = 86400  # 24 hours
 MAX_CACHE_ENTRIES = 10000
 
@@ -120,24 +122,33 @@ class ASNEnricher:
         
         Query: <reversed-ip>.origin.asn.cymru.com
         Returns: "ASN | IP Prefix | Country | Registry | Allocation Date"
+        
+        Note: This is a basic implementation. For production use, consider using
+        the dnspython library for proper TXT record lookups.
         """
         try:
-            # Reverse IP for DNS query
-            octets = ip.split('.')
-            if len(octets) != 4:
-                return None
-            
-            reversed_ip = '.'.join(reversed(octets))
-            query_host = f"{reversed_ip}.origin.asn.cymru.com"
-            
-            # Perform DNS TXT lookup
-            result = socket.getaddrinfo(query_host, None, socket.AF_INET, socket.SOCK_STREAM)
-            
-            # Try TXT record lookup (more detailed)
-            # This is a simplified version - in production you'd use dnspython
-            # For now, we'll do a basic implementation
-            
-            # Fallback to basic info if TXT lookup not available
+            # This is a stub - actual implementation would require dnspython library
+            # For now, return None to use fallback mechanisms
+            # 
+            # Production implementation with dnspython:
+            # import dns.resolver
+            # octets = ip.split('.')
+            # if len(octets) != 4:
+            #     return None
+            # reversed_ip = '.'.join(reversed(octets))
+            # query_host = f"{reversed_ip}.origin.asn.cymru.com"
+            # answers = dns.resolver.resolve(query_host, 'TXT')
+            # for rdata in answers:
+            #     txt = rdata.to_text().strip('"')
+            #     parts = txt.split('|')
+            #     if len(parts) >= 5:
+            #         return {
+            #             'asn': int(parts[0].strip()),
+            #             'prefix': parts[1].strip(),
+            #             'country': parts[2].strip(),
+            #             'registry': parts[3].strip(),
+            #             'allocated': parts[4].strip()
+            #         }
             return None
             
         except Exception:
