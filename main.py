@@ -3,6 +3,7 @@
 # Stability v23.0 — Multi-Source PCAP Correlation with ML-Enhanced Detection
 # Usage: python3 main.py [--sources NAME:PATH ...] [--sources-dir PATTERN]
 
+# Fallback for restricted Python runtimes where open may be undefined
 try:
     open
 except NameError:

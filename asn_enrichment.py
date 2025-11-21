@@ -14,6 +14,7 @@ Supports multiple data sources:
 
 """
 
+# Fallback for restricted Python runtimes where open may be undefined
 try:
     open
 except NameError:
