@@ -5575,7 +5575,13 @@ def pipeline(pcap_sources=None):
         # ✅ NEW: Botnet Family Detection
         print("[28/42] Detecting botnet families across protocols...")
         botnet_detections = pd.DataFrame()
-        all_botnet_detections = []
+        
+        # Separate lists for each protocol type
+        all_tcp_detections = []
+        all_http_detections = []
+        all_tls_detections = []
+        all_dns_detections = []
+        all_irc_detections = []
         
         if BOTNET_DETECTION_AVAILABLE:
             try:
@@ -5585,22 +5591,24 @@ def pipeline(pcap_sources=None):
                     
                     # Detect in TCP payloads for this source
                     botnet_tcp = detect_botnet_in_tcp(source_data['tcp'], source_id, pcap_file)
+                    all_tcp_detections.append(botnet_tcp)
                     
                     # Detect in HTTP traffic for this source
                     botnet_http = detect_botnet_in_http(source_data['http'], source_id, pcap_file)
+                    all_http_detections.append(botnet_http)
                     
                     # Detect in TLS/JA3 for this source
                     botnet_tls = detect_botnet_in_tls(source_data['tls'], source_id, pcap_file)
+                    all_tls_detections.append(botnet_tls)
                     
                     # Detect in DNS for this source
                     botnet_dns = detect_botnet_in_dns(source_data['dns'], source_id, pcap_file)
+                    all_dns_detections.append(botnet_dns)
                     
                     # Detect in IRC (filter TCP by IRC ports) for this source
                     tcp_irc = source_data['tcp'][source_data['tcp']['DST_PORT'].isin(PROTOCOL_PORTS['IRC'])] if 'DST_PORT' in source_data['tcp'].columns and not source_data['tcp'].empty else pd.DataFrame()
                     botnet_irc = detect_botnet_in_irc(tcp_irc, source_id, pcap_file)
-                    
-                    # Store all detections from this source
-                    all_botnet_detections.extend([botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc])
+                    all_irc_detections.append(botnet_irc)
                     
                     # Count detections for this source
                     source_dfs = [botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc]
@@ -5614,19 +5622,13 @@ def pipeline(pcap_sources=None):
                 
                 # Aggregate all detections to deduplicate and consolidate
                 # This groups by (FAMILY, SRC_IP, DST_IP) to prevent duplicate families from dominating the report
-                if all_botnet_detections:
-                    # Combine all detection DataFrames
-                    tcp_dfs = [df for i, df in enumerate(all_botnet_detections) if i % 5 == 0]
-                    http_dfs = [df for i, df in enumerate(all_botnet_detections) if i % 5 == 1]
-                    tls_dfs = [df for i, df in enumerate(all_botnet_detections) if i % 5 == 2]
-                    dns_dfs = [df for i, df in enumerate(all_botnet_detections) if i % 5 == 3]
-                    irc_dfs = [df for i, df in enumerate(all_botnet_detections) if i % 5 == 4]
-                    
-                    combined_tcp = pd.concat(tcp_dfs, ignore_index=True) if tcp_dfs else pd.DataFrame()
-                    combined_http = pd.concat(http_dfs, ignore_index=True) if http_dfs else pd.DataFrame()
-                    combined_tls = pd.concat(tls_dfs, ignore_index=True) if tls_dfs else pd.DataFrame()
-                    combined_dns = pd.concat(dns_dfs, ignore_index=True) if dns_dfs else pd.DataFrame()
-                    combined_irc = pd.concat(irc_dfs, ignore_index=True) if irc_dfs else pd.DataFrame()
+                if all_tcp_detections or all_http_detections or all_tls_detections or all_dns_detections or all_irc_detections:
+                    # Combine detections by protocol type
+                    combined_tcp = pd.concat(all_tcp_detections, ignore_index=True) if all_tcp_detections else pd.DataFrame()
+                    combined_http = pd.concat(all_http_detections, ignore_index=True) if all_http_detections else pd.DataFrame()
+                    combined_tls = pd.concat(all_tls_detections, ignore_index=True) if all_tls_detections else pd.DataFrame()
+                    combined_dns = pd.concat(all_dns_detections, ignore_index=True) if all_dns_detections else pd.DataFrame()
+                    combined_irc = pd.concat(all_irc_detections, ignore_index=True) if all_irc_detections else pd.DataFrame()
                     
                     # Use aggregation to deduplicate by (FAMILY, SRC_IP, DST_IP)
                     botnet_detections = aggregate_botnet_detections(

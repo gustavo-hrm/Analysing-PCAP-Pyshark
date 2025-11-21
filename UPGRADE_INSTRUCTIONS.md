@@ -81,11 +81,11 @@ If you see "0 detections", it means your PCAP doesn't have botnet traffic.
 ### Issue: Only seeing one botnet family (e.g., only TrickBot)
 **Problem:** Report shows only one family repeatedly, but you expected to see multiple families
 
-**Cause:** Make sure you have the latest version with commit `eb276f5` or later. Earlier versions had an issue where duplicate detections of one family could fill the display, hiding other families.
+**Cause:** Earlier versions of this PR had an issue where duplicate detections of one family could fill the display, hiding other families. This was fixed by restoring aggregation logic.
 
-**Solution:** Pull the latest code which includes aggregation to deduplicate detections by `(FAMILY, SRC_IP, DST_IP)`.
+**Solution:** Make sure you have the latest version of both `main.py` and `botnet_detector.py` from this PR.
 
-**How it works now:** If TrickBot is detected in 10 packets, it shows as 1 row with COUNT=10 instead of 10 separate rows, leaving room for other families to be displayed.
+**How it works now:** Detections are aggregated by `(FAMILY, SRC_IP, DST_IP)`. If TrickBot is detected in 10 packets, it shows as 1 row with COUNT=10 instead of 10 separate rows, leaving room for other families to be displayed.
 
 ### Issue: Module import errors
 **Problem:** `ModuleNotFoundError: No module named 'botnet_detector'`
