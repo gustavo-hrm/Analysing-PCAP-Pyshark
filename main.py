@@ -5612,11 +5612,11 @@ def pipeline(pcap_sources=None):
                         source_count = 0
                     print(f"  - Source '{source_id}' ({pcap_file}): {source_count} detections")
                 
-                # Aggregate all detections (this will preserve SOURCE_ID and PCAP_FILE)
+                # Combine all detections without aggregation to preserve individual source information
                 if all_botnet_detections:
                     combined_detections = pd.concat(all_botnet_detections, ignore_index=True)
                     if not combined_detections.empty:
-                        # Don't aggregate, keep all individual detections with their source information
+                        # Keep all individual detections with their source information
                         botnet_detections = combined_detections.sort_values('CONFIDENCE', ascending=False)
                         print(f"  - Total unique botnet detections: {len(botnet_detections)}")
                         families = botnet_detections['FAMILY'].unique()

@@ -465,6 +465,15 @@ def aggregate_botnet_detections(tcp_det, http_det, tls_det, dns_det, irc_det):
     """
     Aggregate and deduplicate botnet detections from all protocols
     
+    NOTE: This function is preserved for backward compatibility but is NOT currently
+    used in the main pipeline. The main.py now keeps individual detections to preserve
+    full source tracking information (SOURCE_ID, PCAP_FILE) for each detection.
+    
+    If you need aggregation in the future, note that grouping by FAMILY+SRC_IP+DST_IP
+    with 'first' for SOURCE_ID/PCAP_FILE will only preserve the first source's metadata
+    when the same traffic pattern appears across multiple sources. Consider using
+    comma-separated joins (like PROTOCOL field) if you need to preserve all sources.
+    
     Args:
         tcp_det: TCP detections DataFrame
         http_det: HTTP detections DataFrame
