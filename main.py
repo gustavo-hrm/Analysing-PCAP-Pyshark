@@ -4185,7 +4185,14 @@ function updateDashboard(){
   const botnetSlice = (botnetData||[]).filter(r=>(r.CONFIDENCE||0)>=50).slice().sort((a,b)=>(b.CONFIDENCE||0)-(a.CONFIDENCE||0)).slice(0,topN);
   if(document.querySelector('#tbl_botnet tbody')) {
     renderTableRows(document.querySelector('#tbl_botnet tbody'), botnetSlice,
-      ['FAMILY','CATEGORY','SEVERITY','CONFIDENCE','PROTOCOL','EVIDENCE','SRC_IP','DST_IP','COUNT']);
+      ['FAMILY','CATEGORY','SEVERITY','CONFIDENCE','PCAP_FILE','PROTOCOL','EVIDENCE','SRC_IP','DST_IP']);
+  }
+  
+  // ✅ NEW: Botnet Evidence Details Table
+  const botnetEvidenceSlice = (botnetData||[]).filter(r=>(r.CONFIDENCE||0)>=50).slice().sort((a,b)=>(b.CONFIDENCE||0)-(a.CONFIDENCE||0)).slice(0,100); // Show up to 100 evidence items
+  if(document.querySelector('#tbl_botnet_evidence tbody')) {
+    renderTableRows(document.querySelector('#tbl_botnet_evidence tbody'), botnetEvidenceSlice,
+      ['PCAP_FILE','SOURCE_ID','FAMILY','SEVERITY','CONFIDENCE','EVIDENCE','SRC_IP','DST_IP','PROTOCOL','PAYLOAD_SAMPLE']);
   }
   
   // ✅ MULTI-SOURCE CORRELATION TABLES
@@ -5010,7 +5017,13 @@ body.dark .stat-badge{
   <h3>🦠 Botnet Family Detection</h3>
   <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Known botnet families detected via payload signatures, JA3 fingerprints, ports, and behavior patterns</p>
   <div class='chart-box'><canvas id='chart_botnet'></canvas></div>
-  <div class='table-wrap'><table id='tbl_botnet' class='display'><thead><tr><th>Family</th><th>Category</th><th>Severity</th><th>Confidence</th><th>Protocol</th><th>Evidence</th><th>SRC IP</th><th>DST IP</th><th>Count</th></tr></thead><tbody></tbody></table></div>
+  <div class='table-wrap'><table id='tbl_botnet' class='display'><thead><tr><th>Family</th><th>Category</th><th>Severity</th><th>Confidence</th><th>PCAP File</th><th>Protocol</th><th>Evidence</th><th>SRC IP</th><th>DST IP</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>🔬 Botnet Detection Evidence Details</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Detailed evidence for each botnet detection including source PCAP file and indicators</p>
+  <div class='table-wrap'><table id='tbl_botnet_evidence' class='display'><thead><tr><th>PCAP File</th><th>Source ID</th><th>Family</th><th>Severity</th><th>Confidence</th><th>Evidence</th><th>SRC IP</th><th>DST IP</th><th>Protocol</th><th>Payload Sample</th></tr></thead><tbody></tbody></table></div>
 </div>
 
 <div style='margin:32px 0 20px;padding:16px 24px;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);border-radius:var(--radius-md);box-shadow:var(--shadow-lg);'>
