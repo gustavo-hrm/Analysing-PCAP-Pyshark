@@ -13,6 +13,13 @@ Provides integration with threat intelligence feeds and APIs:
 Implements caching and rate limiting to minimize API calls.
 """
 
+# Fallback for restricted Python runtimes where open may be undefined
+try:
+    open
+except NameError:
+    import io
+    open = io.open
+
 import json
 import os
 import time

@@ -14,6 +14,13 @@ Supports multiple data sources:
 
 """
 
+# Fallback for restricted Python runtimes where open may be undefined
+try:
+    open
+except NameError:
+    import io
+    open = io.open
+
 import json
 import os
 import time
