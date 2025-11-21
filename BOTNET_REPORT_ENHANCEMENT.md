@@ -3,6 +3,23 @@
 ## Overview
 This update enhances the Botnet Family Detection report feature to include source PCAP file tracking and detailed evidence tables for improved incident response and threat intelligence analysis.
 
+## ⚠️ Important: Clear Python Cache After Update
+After pulling these changes, you **must** clear Python's module cache:
+
+```bash
+# Clear Python cache files
+rm -rf __pycache__
+rm -f *.pyc
+
+# Then run the analysis
+python3 main.py
+```
+
+**Why?** The function signatures in `botnet_detector.py` have changed to include new parameters. Python caches compiled modules, so if you don't clear the cache, it will use the old version and you'll get errors like:
+```
+detect_botnet_in_tcp() takes 1 positional argument but 3 were given
+```
+
 ## Problem Statement
 Previously, the botnet detection feature would identify malware families but did not track:
 1. Which PCAP file contained the evidence for each detection
