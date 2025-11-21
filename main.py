@@ -5602,7 +5602,14 @@ def pipeline(pcap_sources=None):
                     # Store all detections from this source
                     all_botnet_detections.extend([botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc])
                     
-                    source_count = len(pd.concat([botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc], ignore_index=True)) if any([not df.empty for df in [botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc]]) else 0
+                    # Count detections for this source
+                    source_dfs = [botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc]
+                    has_detections = any(not df.empty for df in source_dfs)
+                    if has_detections:
+                        source_combined = pd.concat(source_dfs, ignore_index=True)
+                        source_count = len(source_combined)
+                    else:
+                        source_count = 0
                     print(f"  - Source '{source_id}' ({pcap_file}): {source_count} detections")
                 
                 # Aggregate all detections (this will preserve SOURCE_ID and PCAP_FILE)
@@ -5617,8 +5624,6 @@ def pipeline(pcap_sources=None):
                 
             except Exception as e:
                 print(f"  - Botnet detection error (non-fatal): {e}")
-                import traceback
-                traceback.print_exc()
                 botnet_detections = pd.DataFrame()
         else:
             print("  - Botnet detection disabled (module not loaded)")
