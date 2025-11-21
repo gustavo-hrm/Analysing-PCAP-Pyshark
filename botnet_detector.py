@@ -46,7 +46,7 @@ def _truncate_evidence(evidence_str, max_length=200):
 # Core Detection Functions
 # -----------------------
 
-def detect_botnet_in_payload(payload, src_ip, dst_ip, dst_port, ja3=None):
+def detect_botnet_in_payload(payload, src_ip, dst_ip, dst_port, ja3=None, source_id='default', pcap_file=''):
     """
     Scan a single payload for botnet signatures
     
@@ -56,6 +56,8 @@ def detect_botnet_in_payload(payload, src_ip, dst_ip, dst_port, ja3=None):
         dst_ip: Destination IP address
         dst_port: Destination port
         ja3: JA3 fingerprint (optional)
+        source_id: Source identifier for multi-source tracking (optional)
+        pcap_file: PCAP filename for evidence tracking (optional)
         
     Returns:
         list: List of detection dictionaries with family, confidence, evidence
@@ -150,17 +152,21 @@ def detect_botnet_in_payload(payload, src_ip, dst_ip, dst_port, ja3=None):
                     "DST_PORT": dst_port,
                     "JA3": ja3 or "",
                     "PAYLOAD_SAMPLE": payload_str[:200],  # First 200 chars
+                    "SOURCE_ID": source_id,
+                    "PCAP_FILE": pcap_file,
                 })
     
     return detections
 
 
-def detect_botnet_in_tcp(tcp_df):
+def detect_botnet_in_tcp(tcp_df, source_id='default', pcap_file=''):
     """
     Scan TCP flows for botnet signatures
     
     Args:
         tcp_df: DataFrame with TCP packets (must have SRC_IP, DST_IP, DST_PORT, PAYLOAD columns)
+        source_id: Source identifier for multi-source tracking (optional)
+        pcap_file: PCAP filename for evidence tracking (optional)
         
     Returns:
         DataFrame with botnet detections
@@ -171,7 +177,7 @@ def detect_botnet_in_tcp(tcp_df):
         return pd.DataFrame(columns=[
             'FAMILY', 'CATEGORY', 'SEVERITY', 'CONFIDENCE', 'SCORE', 
             'EVIDENCE', 'MATCHES', 'SRC_IP', 'DST_IP', 'DST_PORT', 
-            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL'
+            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'SOURCE_ID', 'PCAP_FILE'
         ])
     
     # Process each TCP packet
@@ -184,7 +190,8 @@ def detect_botnet_in_tcp(tcp_df):
         dst_ip = row.get('DST_IP', '')
         dst_port = row.get('DST_PORT', 0)
         
-        results = detect_botnet_in_payload(payload, src_ip, dst_ip, dst_port)
+        results = detect_botnet_in_payload(payload, src_ip, dst_ip, dst_port, 
+                                          source_id=source_id, pcap_file=pcap_file)
         for det in results:
             det['PROTOCOL'] = 'TCP'
             detections.append(det)
@@ -192,16 +199,18 @@ def detect_botnet_in_tcp(tcp_df):
     return pd.DataFrame(detections) if detections else pd.DataFrame(columns=[
         'FAMILY', 'CATEGORY', 'SEVERITY', 'CONFIDENCE', 'SCORE', 
         'EVIDENCE', 'MATCHES', 'SRC_IP', 'DST_IP', 'DST_PORT', 
-        'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL'
+        'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'SOURCE_ID', 'PCAP_FILE'
     ])
 
 
-def detect_botnet_in_http(http_df):
+def detect_botnet_in_http(http_df, source_id='default', pcap_file=''):
     """
     Scan HTTP traffic for botnet signatures
     
     Args:
         http_df: DataFrame with HTTP requests (must have DOMAIN, REQUEST, PAYLOAD columns)
+        source_id: Source identifier for multi-source tracking (optional)
+        pcap_file: PCAP filename for evidence tracking (optional)
         
     Returns:
         DataFrame with botnet detections
@@ -212,7 +221,7 @@ def detect_botnet_in_http(http_df):
         return pd.DataFrame(columns=[
             'FAMILY', 'CATEGORY', 'SEVERITY', 'CONFIDENCE', 'SCORE', 
             'EVIDENCE', 'MATCHES', 'SRC_IP', 'DST_IP', 'DST_PORT', 
-            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL'
+            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'DOMAIN', 'SOURCE_ID', 'PCAP_FILE'
         ])
     
     # Process each HTTP request
@@ -230,7 +239,8 @@ def detect_botnet_in_http(http_df):
         if '443' in payload.lower() or 'https' in payload.lower():
             dst_port = 443
         
-        results = detect_botnet_in_payload(payload, src_ip, dst_ip, dst_port)
+        results = detect_botnet_in_payload(payload, src_ip, dst_ip, dst_port,
+                                          source_id=source_id, pcap_file=pcap_file)
         for det in results:
             det['PROTOCOL'] = 'HTTP'
             det['DOMAIN'] = domain
@@ -239,16 +249,18 @@ def detect_botnet_in_http(http_df):
     return pd.DataFrame(detections) if detections else pd.DataFrame(columns=[
         'FAMILY', 'CATEGORY', 'SEVERITY', 'CONFIDENCE', 'SCORE', 
         'EVIDENCE', 'MATCHES', 'SRC_IP', 'DST_IP', 'DST_PORT', 
-        'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'DOMAIN'
+        'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'DOMAIN', 'SOURCE_ID', 'PCAP_FILE'
     ])
 
 
-def detect_botnet_in_tls(tls_df):
+def detect_botnet_in_tls(tls_df, source_id='default', pcap_file=''):
     """
     Scan TLS traffic for botnet signatures using JA3 fingerprints
     
     Args:
         tls_df: DataFrame with TLS connections (must have SNI, JA3, SRC_IP, DST_IP columns)
+        source_id: Source identifier for multi-source tracking (optional)
+        pcap_file: PCAP filename for evidence tracking (optional)
         
     Returns:
         DataFrame with botnet detections
@@ -259,7 +271,7 @@ def detect_botnet_in_tls(tls_df):
         return pd.DataFrame(columns=[
             'FAMILY', 'CATEGORY', 'SEVERITY', 'CONFIDENCE', 'SCORE', 
             'EVIDENCE', 'MATCHES', 'SRC_IP', 'DST_IP', 'DST_PORT', 
-            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL'
+            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'SOURCE_ID', 'PCAP_FILE'
         ])
     
     # Build JA3 lookup map
@@ -299,21 +311,25 @@ def detect_botnet_in_tls(tls_df):
                 'JA3': ja3,
                 'PAYLOAD_SAMPLE': f"SNI: {sni}",
                 'PROTOCOL': 'TLS',
+                'SOURCE_ID': source_id,
+                'PCAP_FILE': pcap_file,
             })
     
     return pd.DataFrame(detections) if detections else pd.DataFrame(columns=[
         'FAMILY', 'CATEGORY', 'SEVERITY', 'CONFIDENCE', 'SCORE', 
         'EVIDENCE', 'MATCHES', 'SRC_IP', 'DST_IP', 'DST_PORT', 
-        'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL'
+        'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'SOURCE_ID', 'PCAP_FILE'
     ])
 
 
-def detect_botnet_in_dns(dns_df):
+def detect_botnet_in_dns(dns_df, source_id='default', pcap_file=''):
     """
     Scan DNS queries for botnet C2 domains
     
     Args:
         dns_df: DataFrame with DNS queries (must have DOMAIN column)
+        source_id: Source identifier for multi-source tracking (optional)
+        pcap_file: PCAP filename for evidence tracking (optional)
         
     Returns:
         DataFrame with botnet detections
@@ -324,7 +340,7 @@ def detect_botnet_in_dns(dns_df):
         return pd.DataFrame(columns=[
             'FAMILY', 'CATEGORY', 'SEVERITY', 'CONFIDENCE', 'SCORE', 
             'EVIDENCE', 'MATCHES', 'SRC_IP', 'DST_IP', 'DST_PORT', 
-            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL'
+            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'SOURCE_ID', 'PCAP_FILE'
         ])
     
     # Process each DNS query
@@ -360,6 +376,8 @@ def detect_botnet_in_dns(dns_df):
                             'JA3': '',
                             'PAYLOAD_SAMPLE': f"Domain: {domain}",
                             'PROTOCOL': 'DNS',
+                            'SOURCE_ID': source_id,
+                            'PCAP_FILE': pcap_file,
                         })
                         break  # Only match once per family
                 except re.error:
@@ -368,16 +386,18 @@ def detect_botnet_in_dns(dns_df):
     return pd.DataFrame(detections) if detections else pd.DataFrame(columns=[
         'FAMILY', 'CATEGORY', 'SEVERITY', 'CONFIDENCE', 'SCORE', 
         'EVIDENCE', 'MATCHES', 'SRC_IP', 'DST_IP', 'DST_PORT', 
-        'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL'
+        'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'SOURCE_ID', 'PCAP_FILE'
     ])
 
 
-def detect_botnet_in_irc(tcp_df):
+def detect_botnet_in_irc(tcp_df, source_id='default', pcap_file=''):
     """
     Scan IRC traffic for botnet C2 channels
     
     Args:
         tcp_df: DataFrame with TCP packets filtered to IRC ports
+        source_id: Source identifier for multi-source tracking (optional)
+        pcap_file: PCAP filename for evidence tracking (optional)
         
     Returns:
         DataFrame with botnet detections
@@ -388,7 +408,7 @@ def detect_botnet_in_irc(tcp_df):
         return pd.DataFrame(columns=[
             'FAMILY', 'CATEGORY', 'SEVERITY', 'CONFIDENCE', 'SCORE', 
             'EVIDENCE', 'MATCHES', 'SRC_IP', 'DST_IP', 'DST_PORT', 
-            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL'
+            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'SOURCE_ID', 'PCAP_FILE'
         ])
     
     # IRC-specific pattern matching
@@ -430,12 +450,14 @@ def detect_botnet_in_irc(tcp_df):
                 'JA3': '',
                 'PAYLOAD_SAMPLE': payload[:200],
                 'PROTOCOL': 'IRC',
+                'SOURCE_ID': source_id,
+                'PCAP_FILE': pcap_file,
             })
     
     return pd.DataFrame(detections) if detections else pd.DataFrame(columns=[
         'FAMILY', 'CATEGORY', 'SEVERITY', 'CONFIDENCE', 'SCORE', 
         'EVIDENCE', 'MATCHES', 'SRC_IP', 'DST_IP', 'DST_PORT', 
-        'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL'
+        'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'SOURCE_ID', 'PCAP_FILE'
     ])
 
 
@@ -460,7 +482,7 @@ def aggregate_botnet_detections(tcp_det, http_det, tls_det, dns_det, irc_det):
         return pd.DataFrame(columns=[
             'FAMILY', 'CATEGORY', 'SEVERITY', 'CONFIDENCE', 'SCORE', 
             'EVIDENCE', 'MATCHES', 'SRC_IP', 'DST_IP', 'DST_PORT', 
-            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'COUNT'
+            'JA3', 'PAYLOAD_SAMPLE', 'PROTOCOL', 'COUNT', 'SOURCE_ID', 'PCAP_FILE'
         ])
     
     # Deduplicate and aggregate by family + source IP + dest IP
@@ -475,6 +497,8 @@ def aggregate_botnet_detections(tcp_det, http_det, tls_det, dns_det, irc_det):
         'JA3': 'first',
         'PAYLOAD_SAMPLE': 'first',
         'PROTOCOL': lambda x: ','.join(set(x)),  # List all protocols
+        'SOURCE_ID': 'first',  # Keep source tracking
+        'PCAP_FILE': 'first',  # Keep PCAP file name
     })
     
     # Add count column

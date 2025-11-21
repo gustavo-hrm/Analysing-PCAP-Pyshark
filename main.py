@@ -5562,39 +5562,50 @@ def pipeline(pcap_sources=None):
         # ✅ NEW: Botnet Family Detection
         print("[28/42] Detecting botnet families across protocols...")
         botnet_detections = pd.DataFrame()
+        all_botnet_detections = []
+        
         if BOTNET_DETECTION_AVAILABLE:
             try:
-                # Detect in TCP payloads
-                botnet_tcp = detect_botnet_in_tcp(tcp)
-                print(f"  - TCP botnet signatures: {len(botnet_tcp)}")
+                # Process each source individually to track PCAP file names
+                for source_id, source_data in source_results.items():
+                    pcap_file = os.path.basename(source_data['pcap_path'])
+                    
+                    # Detect in TCP payloads for this source
+                    botnet_tcp = detect_botnet_in_tcp(source_data['tcp'], source_id, pcap_file)
+                    
+                    # Detect in HTTP traffic for this source
+                    botnet_http = detect_botnet_in_http(source_data['http'], source_id, pcap_file)
+                    
+                    # Detect in TLS/JA3 for this source
+                    botnet_tls = detect_botnet_in_tls(source_data['tls'], source_id, pcap_file)
+                    
+                    # Detect in DNS for this source
+                    botnet_dns = detect_botnet_in_dns(source_data['dns'], source_id, pcap_file)
+                    
+                    # Detect in IRC (filter TCP by IRC ports) for this source
+                    tcp_irc = source_data['tcp'][source_data['tcp']['DST_PORT'].isin(PROTOCOL_PORTS['IRC'])] if 'DST_PORT' in source_data['tcp'].columns and not source_data['tcp'].empty else pd.DataFrame()
+                    botnet_irc = detect_botnet_in_irc(tcp_irc, source_id, pcap_file)
+                    
+                    # Store all detections from this source
+                    all_botnet_detections.extend([botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc])
+                    
+                    source_count = len(pd.concat([botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc], ignore_index=True)) if any([not df.empty for df in [botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc]]) else 0
+                    print(f"  - Source '{source_id}' ({pcap_file}): {source_count} detections")
                 
-                # Detect in HTTP traffic
-                botnet_http = detect_botnet_in_http(http)
-                print(f"  - HTTP botnet signatures: {len(botnet_http)}")
+                # Aggregate all detections (this will preserve SOURCE_ID and PCAP_FILE)
+                if all_botnet_detections:
+                    combined_detections = pd.concat(all_botnet_detections, ignore_index=True)
+                    if not combined_detections.empty:
+                        # Don't aggregate, keep all individual detections with their source information
+                        botnet_detections = combined_detections.sort_values('CONFIDENCE', ascending=False)
+                        print(f"  - Total unique botnet detections: {len(botnet_detections)}")
+                        families = botnet_detections['FAMILY'].unique()
+                        print(f"  - Families detected: {', '.join(families)}")
                 
-                # Detect in TLS/JA3
-                botnet_tls = detect_botnet_in_tls(tls)
-                print(f"  - TLS/JA3 botnet signatures: {len(botnet_tls)}")
-                
-                # Detect in DNS
-                botnet_dns = detect_botnet_in_dns(dns)
-                print(f"  - DNS botnet signatures: {len(botnet_dns)}")
-                
-                # Detect in IRC (filter TCP by IRC ports)
-                tcp_irc = tcp[tcp['DST_PORT'].isin(PROTOCOL_PORTS['IRC'])] if 'DST_PORT' in tcp.columns and not tcp.empty else pd.DataFrame()
-                botnet_irc = detect_botnet_in_irc(tcp_irc)
-                print(f"  - IRC botnet signatures: {len(botnet_irc)}")
-                
-                # Aggregate all detections
-                botnet_detections = aggregate_botnet_detections(
-                    botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc
-                )
-                print(f"  - Total unique botnet detections: {len(botnet_detections)}")
-                if not botnet_detections.empty:
-                    families = botnet_detections['FAMILY'].unique()
-                    print(f"  - Families detected: {', '.join(families)}")
             except Exception as e:
                 print(f"  - Botnet detection error (non-fatal): {e}")
+                import traceback
+                traceback.print_exc()
                 botnet_detections = pd.DataFrame()
         else:
             print("  - Botnet detection disabled (module not loaded)")
