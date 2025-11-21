@@ -5612,13 +5612,29 @@ def pipeline(pcap_sources=None):
                         source_count = 0
                     print(f"  - Source '{source_id}' ({pcap_file}): {source_count} detections")
                 
-                # Combine all detections without aggregation to preserve individual source information
+                # Aggregate all detections to deduplicate and consolidate
+                # This groups by (FAMILY, SRC_IP, DST_IP) to prevent duplicate families from dominating the report
                 if all_botnet_detections:
-                    combined_detections = pd.concat(all_botnet_detections, ignore_index=True)
-                    if not combined_detections.empty:
-                        # Keep all individual detections with their source information
-                        botnet_detections = combined_detections.sort_values('CONFIDENCE', ascending=False)
-                        print(f"  - Total unique botnet detections: {len(botnet_detections)}")
+                    # Combine all detection DataFrames
+                    tcp_dfs = [df for i, df in enumerate(all_botnet_detections) if i % 5 == 0]
+                    http_dfs = [df for i, df in enumerate(all_botnet_detections) if i % 5 == 1]
+                    tls_dfs = [df for i, df in enumerate(all_botnet_detections) if i % 5 == 2]
+                    dns_dfs = [df for i, df in enumerate(all_botnet_detections) if i % 5 == 3]
+                    irc_dfs = [df for i, df in enumerate(all_botnet_detections) if i % 5 == 4]
+                    
+                    combined_tcp = pd.concat(tcp_dfs, ignore_index=True) if tcp_dfs else pd.DataFrame()
+                    combined_http = pd.concat(http_dfs, ignore_index=True) if http_dfs else pd.DataFrame()
+                    combined_tls = pd.concat(tls_dfs, ignore_index=True) if tls_dfs else pd.DataFrame()
+                    combined_dns = pd.concat(dns_dfs, ignore_index=True) if dns_dfs else pd.DataFrame()
+                    combined_irc = pd.concat(irc_dfs, ignore_index=True) if irc_dfs else pd.DataFrame()
+                    
+                    # Use aggregation to deduplicate by (FAMILY, SRC_IP, DST_IP)
+                    botnet_detections = aggregate_botnet_detections(
+                        combined_tcp, combined_http, combined_tls, combined_dns, combined_irc
+                    )
+                    
+                    if not botnet_detections.empty:
+                        print(f"  - Total unique botnet detections (after deduplication): {len(botnet_detections)}")
                         families = botnet_detections['FAMILY'].unique()
                         print(f"  - Families detected: {', '.join(families)}")
                 
