@@ -4185,7 +4185,14 @@ function updateDashboard(){
   const botnetSlice = (botnetData||[]).filter(r=>(r.CONFIDENCE||0)>=50).slice().sort((a,b)=>(b.CONFIDENCE||0)-(a.CONFIDENCE||0)).slice(0,topN);
   if(document.querySelector('#tbl_botnet tbody')) {
     renderTableRows(document.querySelector('#tbl_botnet tbody'), botnetSlice,
-      ['FAMILY','CATEGORY','SEVERITY','CONFIDENCE','PROTOCOL','EVIDENCE','SRC_IP','DST_IP','COUNT']);
+      ['FAMILY','CATEGORY','SEVERITY','CONFIDENCE','PCAP_FILE','PROTOCOL','EVIDENCE','SRC_IP','DST_IP']);
+  }
+  
+  // ✅ NEW: Botnet Evidence Details Table
+  const botnetEvidenceSlice = (botnetData||[]).filter(r=>(r.CONFIDENCE||0)>=50).slice().sort((a,b)=>(b.CONFIDENCE||0)-(a.CONFIDENCE||0)).slice(0,100); // Show up to 100 evidence items
+  if(document.querySelector('#tbl_botnet_evidence tbody')) {
+    renderTableRows(document.querySelector('#tbl_botnet_evidence tbody'), botnetEvidenceSlice,
+      ['PCAP_FILE','SOURCE_ID','FAMILY','SEVERITY','CONFIDENCE','EVIDENCE','SRC_IP','DST_IP','PROTOCOL','PAYLOAD_SAMPLE']);
   }
   
   // ✅ MULTI-SOURCE CORRELATION TABLES
@@ -5010,7 +5017,13 @@ body.dark .stat-badge{
   <h3>🦠 Botnet Family Detection</h3>
   <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Known botnet families detected via payload signatures, JA3 fingerprints, ports, and behavior patterns</p>
   <div class='chart-box'><canvas id='chart_botnet'></canvas></div>
-  <div class='table-wrap'><table id='tbl_botnet' class='display'><thead><tr><th>Family</th><th>Category</th><th>Severity</th><th>Confidence</th><th>Protocol</th><th>Evidence</th><th>SRC IP</th><th>DST IP</th><th>Count</th></tr></thead><tbody></tbody></table></div>
+  <div class='table-wrap'><table id='tbl_botnet' class='display'><thead><tr><th>Family</th><th>Category</th><th>Severity</th><th>Confidence</th><th>PCAP File</th><th>Protocol</th><th>Evidence</th><th>SRC IP</th><th>DST IP</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<div style='margin-top:18px' class='card'>
+  <h3>🔬 Botnet Detection Evidence Details</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Detailed evidence for each botnet detection including source PCAP file and indicators</p>
+  <div class='table-wrap'><table id='tbl_botnet_evidence' class='display'><thead><tr><th>PCAP File</th><th>Source ID</th><th>Family</th><th>Severity</th><th>Confidence</th><th>Evidence</th><th>SRC IP</th><th>DST IP</th><th>Protocol</th><th>Payload Sample</th></tr></thead><tbody></tbody></table></div>
 </div>
 
 <div style='margin:32px 0 20px;padding:16px 24px;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);border-radius:var(--radius-md);box-shadow:var(--shadow-lg);'>
@@ -5562,37 +5575,71 @@ def pipeline(pcap_sources=None):
         # ✅ NEW: Botnet Family Detection
         print("[28/42] Detecting botnet families across protocols...")
         botnet_detections = pd.DataFrame()
+        
+        # Separate lists for each protocol type
+        all_tcp_detections = []
+        all_http_detections = []
+        all_tls_detections = []
+        all_dns_detections = []
+        all_irc_detections = []
+        
         if BOTNET_DETECTION_AVAILABLE:
             try:
-                # Detect in TCP payloads
-                botnet_tcp = detect_botnet_in_tcp(tcp)
-                print(f"  - TCP botnet signatures: {len(botnet_tcp)}")
+                # Process each source individually to track PCAP file names
+                for source_id, source_data in source_results.items():
+                    pcap_file = os.path.basename(source_data['pcap_path'])
+                    
+                    # Detect in TCP payloads for this source
+                    botnet_tcp = detect_botnet_in_tcp(source_data['tcp'], source_id, pcap_file)
+                    all_tcp_detections.append(botnet_tcp)
+                    
+                    # Detect in HTTP traffic for this source
+                    botnet_http = detect_botnet_in_http(source_data['http'], source_id, pcap_file)
+                    all_http_detections.append(botnet_http)
+                    
+                    # Detect in TLS/JA3 for this source
+                    botnet_tls = detect_botnet_in_tls(source_data['tls'], source_id, pcap_file)
+                    all_tls_detections.append(botnet_tls)
+                    
+                    # Detect in DNS for this source
+                    botnet_dns = detect_botnet_in_dns(source_data['dns'], source_id, pcap_file)
+                    all_dns_detections.append(botnet_dns)
+                    
+                    # Detect in IRC (filter TCP by IRC ports) for this source
+                    tcp_irc = source_data['tcp'][source_data['tcp']['DST_PORT'].isin(PROTOCOL_PORTS['IRC'])] if 'DST_PORT' in source_data['tcp'].columns and not source_data['tcp'].empty else pd.DataFrame()
+                    botnet_irc = detect_botnet_in_irc(tcp_irc, source_id, pcap_file)
+                    all_irc_detections.append(botnet_irc)
+                    
+                    # Count detections for this source
+                    source_dfs = [botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc]
+                    has_detections = any(not df.empty for df in source_dfs)
+                    if has_detections:
+                        source_combined = pd.concat(source_dfs, ignore_index=True)
+                        source_count = len(source_combined)
+                    else:
+                        source_count = 0
+                    print(f"  - Source '{source_id}' ({pcap_file}): {source_count} detections")
                 
-                # Detect in HTTP traffic
-                botnet_http = detect_botnet_in_http(http)
-                print(f"  - HTTP botnet signatures: {len(botnet_http)}")
+                # Aggregate all detections to deduplicate and consolidate
+                # This groups by (FAMILY, SRC_IP, DST_IP) to prevent duplicate families from dominating the report
+                if all_tcp_detections or all_http_detections or all_tls_detections or all_dns_detections or all_irc_detections:
+                    # Combine detections by protocol type
+                    combined_tcp = pd.concat(all_tcp_detections, ignore_index=True) if all_tcp_detections else pd.DataFrame()
+                    combined_http = pd.concat(all_http_detections, ignore_index=True) if all_http_detections else pd.DataFrame()
+                    combined_tls = pd.concat(all_tls_detections, ignore_index=True) if all_tls_detections else pd.DataFrame()
+                    combined_dns = pd.concat(all_dns_detections, ignore_index=True) if all_dns_detections else pd.DataFrame()
+                    combined_irc = pd.concat(all_irc_detections, ignore_index=True) if all_irc_detections else pd.DataFrame()
+                    
+                    # Use aggregation to deduplicate by (FAMILY, SRC_IP, DST_IP)
+                    botnet_detections = aggregate_botnet_detections(
+                        combined_tcp, combined_http, combined_tls, combined_dns, combined_irc
+                    )
+                    
+                    if not botnet_detections.empty:
+                        print(f"  - Total unique botnet detections (after deduplication): {len(botnet_detections)}")
+                        families = botnet_detections['FAMILY'].unique()
+                        print(f"  - Families detected: {', '.join(families)}")
                 
-                # Detect in TLS/JA3
-                botnet_tls = detect_botnet_in_tls(tls)
-                print(f"  - TLS/JA3 botnet signatures: {len(botnet_tls)}")
-                
-                # Detect in DNS
-                botnet_dns = detect_botnet_in_dns(dns)
-                print(f"  - DNS botnet signatures: {len(botnet_dns)}")
-                
-                # Detect in IRC (filter TCP by IRC ports)
-                tcp_irc = tcp[tcp['DST_PORT'].isin(PROTOCOL_PORTS['IRC'])] if 'DST_PORT' in tcp.columns and not tcp.empty else pd.DataFrame()
-                botnet_irc = detect_botnet_in_irc(tcp_irc)
-                print(f"  - IRC botnet signatures: {len(botnet_irc)}")
-                
-                # Aggregate all detections
-                botnet_detections = aggregate_botnet_detections(
-                    botnet_tcp, botnet_http, botnet_tls, botnet_dns, botnet_irc
-                )
-                print(f"  - Total unique botnet detections: {len(botnet_detections)}")
-                if not botnet_detections.empty:
-                    families = botnet_detections['FAMILY'].unique()
-                    print(f"  - Families detected: {', '.join(families)}")
             except Exception as e:
                 print(f"  - Botnet detection error (non-fatal): {e}")
                 botnet_detections = pd.DataFrame()
