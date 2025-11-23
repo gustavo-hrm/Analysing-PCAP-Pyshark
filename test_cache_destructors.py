@@ -62,23 +62,23 @@ del builtins.open
 
 # Now call __del__ - should not raise exception
 try:
-    threat_cache2.__del__()
-    print("✓ ThreatIntelCache.__del__() handled missing 'open' gracefully")
-except Exception as e:
-    print(f"✗ ThreatIntelCache.__del__() raised exception with missing 'open': {e}")
-    builtins.open = original_open
-    sys.exit(1)
+    try:
+        threat_cache2.__del__()
+        print("✓ ThreatIntelCache.__del__() handled missing 'open' gracefully")
+    except Exception as e:
+        print(f"✗ ThreatIntelCache.__del__() raised exception with missing 'open': {e}")
+        sys.exit(1)
 
-try:
-    asn_cache2.__del__()
-    print("✓ ASNCache.__del__() handled missing 'open' gracefully")
-except Exception as e:
-    print(f"✗ ASNCache.__del__() raised exception with missing 'open': {e}")
+    try:
+        asn_cache2.__del__()
+        print("✓ ASNCache.__del__() handled missing 'open' gracefully")
+    except Exception as e:
+        print(f"✗ ASNCache.__del__() raised exception with missing 'open': {e}")
+        sys.exit(1)
+finally:
+    # Always restore 'open' regardless of test outcome
     builtins.open = original_open
-    sys.exit(1)
 
-# Restore 'open'
-builtins.open = original_open
 print("✓ Destructors handle interpreter shutdown gracefully")
 
 print("\n" + "="*60)
