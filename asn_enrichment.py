@@ -113,7 +113,12 @@ class ASNCache:
     
     def __del__(self):
         """Save cache on cleanup"""
-        self.save_cache()
+        try:
+            self.save_cache()
+        except Exception:
+            # Ignore errors during interpreter shutdown (e.g., "name 'open' is not defined").
+            # This is harmless - explicit saves should be done via close()/save() in main code.
+            pass
 
 
 class ASNEnricher:
