@@ -85,7 +85,11 @@ class ASNCache:
             self.cache = {}
     
     def save_cache(self, silent=False):
-        """Save cache to disk"""
+        """Save cache to disk
+        
+        Args:
+            silent: If True, suppress error messages (used by __del__ during shutdown)
+        """
         try:
             # Limit cache size
             if len(self.cache) > MAX_CACHE_ENTRIES:
