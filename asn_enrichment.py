@@ -84,7 +84,7 @@ class ASNCache:
             print(f"[ASN Cache] Failed to load cache: {e}")
             self.cache = {}
     
-    def save_cache(self):
+    def save_cache(self, silent=False):
         """Save cache to disk"""
         try:
             # Limit cache size
@@ -100,7 +100,8 @@ class ASNCache:
             with open(self.cache_file, 'w') as f:
                 json.dump(self.cache, f, indent=2)
         except Exception as e:
-            print(f"[ASN Cache] Failed to save cache: {e}")
+            if not silent:
+                print(f"[ASN Cache] Failed to save cache: {e}")
     
     def get(self, ip):
         """Get cached ASN info for IP"""
@@ -114,7 +115,7 @@ class ASNCache:
     def __del__(self):
         """Save cache on cleanup"""
         try:
-            self.save_cache()
+            self.save_cache(silent=True)
         except Exception:
             # Ignore errors during interpreter shutdown (e.g., "name 'open' is not defined").
             # This is harmless - explicit saves should be done via close()/save() in main code.

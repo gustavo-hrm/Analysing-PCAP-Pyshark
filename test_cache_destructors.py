@@ -60,18 +60,19 @@ asn_cache2.set("10.0.0.1", {"test": "data2"})
 # Delete 'open' to simulate interpreter teardown
 del builtins.open
 
-# Now call __del__ - should not raise exception
+# Now call __del__ - should not raise exception AND should not print errors
+print("Note: The following tests should NOT print any error messages...")
 try:
     try:
         threat_cache2.__del__()
-        print("✓ ThreatIntelCache.__del__() handled missing 'open' gracefully")
+        print("✓ ThreatIntelCache.__del__() handled missing 'open' gracefully (no error messages)")
     except Exception as e:
         print(f"✗ ThreatIntelCache.__del__() raised exception with missing 'open': {e}")
         sys.exit(1)
 
     try:
         asn_cache2.__del__()
-        print("✓ ASNCache.__del__() handled missing 'open' gracefully")
+        print("✓ ASNCache.__del__() handled missing 'open' gracefully (no error messages)")
     except Exception as e:
         print(f"✗ ASNCache.__del__() raised exception with missing 'open': {e}")
         sys.exit(1)
