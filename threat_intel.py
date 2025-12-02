@@ -352,7 +352,7 @@ class ThreatIntelligence:
             )
             
             with urllib.request.urlopen(req, timeout=10) as response:
-                data = json.loads(response.read().decode('utf-8'))
+                data = json.loads(response.read().decode('utf-8', errors='replace'))
             
             attributes = data.get('data', {}).get('attributes', {})
             stats = attributes.get('last_analysis_stats', {})
@@ -361,8 +361,8 @@ class ThreatIntelligence:
             suspicious_count = stats.get('suspicious', 0)
             
             # Calculate score (0-100)
-            total = sum(stats.values()) if stats else 1
-            score = int((malicious_count + suspicious_count * 0.5) / total * 100) if total > 0 else 0
+            total = max(1, sum(stats.values()))
+            score = int((malicious_count + suspicious_count * 0.5) / total * 100)
             
             return {
                 'detected': malicious_count > 0 or suspicious_count > 0,
@@ -410,10 +410,9 @@ class ThreatIntelligence:
             )
             
             with urllib.request.urlopen(req, timeout=10) as response:
-                data = json.loads(response.read().decode('utf-8'))
+                data = json.loads(response.read().decode('utf-8', errors='replace'))
             
             result_data = data.get('data', {})
-            
             abuse_score = result_data.get('abuseConfidenceScore', 0)
             
             return {
@@ -463,7 +462,7 @@ class ThreatIntelligence:
             )
             
             with urllib.request.urlopen(req, timeout=10) as response:
-                data = json.loads(response.read().decode('utf-8'))
+                data = json.loads(response.read().decode('utf-8', errors='replace'))
             
             classification = data.get('classification', 'unknown')
             

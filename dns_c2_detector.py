@@ -364,7 +364,7 @@ class DNSC2Detector:
             if len(timestamps) >= 2:
                 # Check if > 100 queries per minute
                 time_span = max(timestamps) - min(timestamps)
-                if time_span > 0:
+                if time_span > 1.0:  # At least 1 second to avoid division issues
                     queries_per_min = len(timestamps) / (time_span / 60)
                     if queries_per_min > 100:
                         result["is_tunneling"] = True

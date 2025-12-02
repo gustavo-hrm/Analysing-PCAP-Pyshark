@@ -424,18 +424,32 @@ class HTTPC2Detector:
                 suspicion_score += info["confidence"] // 2
 
         # Check User-Agent patterns
-        for ua_pattern in SUSPICIOUS_USER_AGENTS:
-            if re.search(ua_pattern["pattern"], user_agent, re.IGNORECASE):
-                families_detected.add(ua_pattern["family"])
-                indicators.append({
-                    "type": "suspicious_user_agent",
-                    "user_agent": user_agent[:100],
-                    "family": ua_pattern["family"],
-                    "description": ua_pattern["description"],
-                    "confidence": ua_pattern["confidence"],
-                })
-                suspicion_score += ua_pattern["confidence"] // 3
-                break  # Only match first pattern
+        # Check empty User-Agent first for performance
+        if len(user_agent.strip()) == 0:
+            families_detected.add("Suspicious")
+            indicators.append({
+                "type": "suspicious_user_agent",
+                "user_agent": "(empty)",
+                "family": "Suspicious",
+                "description": "Empty User-Agent - suspicious",
+                "confidence": 60,
+            })
+            suspicion_score += 20
+        else:
+            for ua_pattern in SUSPICIOUS_USER_AGENTS:
+                if ua_pattern["pattern"] == r"^$":  # Skip empty pattern since handled above
+                    continue
+                if re.search(ua_pattern["pattern"], user_agent, re.IGNORECASE):
+                    families_detected.add(ua_pattern["family"])
+                    indicators.append({
+                        "type": "suspicious_user_agent",
+                        "user_agent": user_agent[:100],
+                        "family": ua_pattern["family"],
+                        "description": ua_pattern["description"],
+                        "confidence": ua_pattern["confidence"],
+                    })
+                    suspicion_score += ua_pattern["confidence"] // 3
+                    break  # Only match first pattern
 
         # Check for payload patterns in body
         for payload_pattern in PAYLOAD_PATTERNS:
@@ -542,7 +556,7 @@ class HTTPC2Detector:
             # Try to identify specific encoding
             if re.match(r'^[0-9a-fA-F]+$', query_part):
                 result["encoding"] = "hex"
-            elif re.match(r'^[A-Za-z0-9+/=]+$', query_part) and len(query_part) % 4 == 0:
+            elif re.match(r'^[A-Za-z0-9+/\-_]+={0,2}$', query_part) and len(query_part) % 4 == 0:
                 result["encoding"] = "base64"
 
         return result

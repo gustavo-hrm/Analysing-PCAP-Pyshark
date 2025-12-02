@@ -278,13 +278,13 @@ class BeaconingDetector:
         n = len(intervals)
         mean_interval = sum(intervals) / n
 
-        if mean_interval == 0:
+        if mean_interval <= 0:
             return 0.0
 
         # Calculate coefficient of variation
         variance = sum((x - mean_interval) ** 2 for x in intervals) / n
         std_dev = math.sqrt(variance)
-        cv = std_dev / mean_interval if mean_interval > 0 else float('inf')
+        cv = std_dev / mean_interval
 
         # Convert CV to regularity score (inverse relationship)
         # Perfect regularity (cv=0) -> score=100
