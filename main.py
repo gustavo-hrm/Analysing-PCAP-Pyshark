@@ -100,6 +100,23 @@ except ImportError as e:
     get_ip_enrichment = None
     KNOWN_C2_BLOCKLIST_URLS = {}
 
+# C2 Domain Blocklist correlation imports
+C2_DOMAIN_BLOCKLIST_AVAILABLE = False
+try:
+    from c2_domain_blocklist import (
+        load_c2_domains,
+        load_c2_domains_from_urls,
+        correlate_c2_domains_from_pcap,
+        print_c2_domain_hits_table,
+        export_c2_domain_hits_csv
+    )
+    C2_DOMAIN_BLOCKLIST_AVAILABLE = True
+    print("[INFO] C2 domain blocklist correlation enabled")
+except ImportError as e:
+    print(f"[INFO] C2 domain blocklist correlation not available (optional): {e}")
+    load_c2_domains = load_c2_domains_from_urls = None
+    correlate_c2_domains_from_pcap = print_c2_domain_hits_table = export_c2_domain_hits_csv = None
+
 # -----------------------
 # CONFIG
 # -----------------------
@@ -5789,6 +5806,37 @@ def pipeline(pcap_sources=None):
                     print("  - No C2 blocklist matches found")
             except Exception as e:
                 print(f"  - C2 blocklist correlation error (non-fatal): {e}")
+        
+        # ✅ NEW: C2 Domain Blocklist Correlation
+        c2_domain_hits = pd.DataFrame()
+        if C2_DOMAIN_BLOCKLIST_AVAILABLE:
+            print("[17c/20] Correlating traffic with C2 domain blocklist...")
+            try:
+                # Load C2 domain blocklist from file and defaults
+                print("  - Loading C2 domain blocklist...")
+                c2_domains = load_c2_domains('c2_domains_blocklist.txt', include_default=True)
+                
+                # Correlate DNS, HTTP, TLS traffic against domain blocklist
+                c2_domain_hits = correlate_c2_domains_from_pcap(
+                    dns_df=dns,
+                    http_df=http,
+                    tls_df=tls,
+                    c2_domains=c2_domains,
+                    pcap_file=os.path.basename(pcap)
+                )
+                
+                if not c2_domain_hits.empty:
+                    print(f"  - 🚨 C2 domain blocklist matches: {len(c2_domain_hits)}")
+                    # Print the table to console
+                    print_c2_domain_hits_table(c2_domain_hits)
+                    # Export to CSV
+                    csv_file = export_c2_domain_hits_csv(c2_domain_hits, 'c2_domain_hits.csv')
+                    if csv_file:
+                        print(f"  - Exported to: {csv_file}")
+                else:
+                    print("  - No C2 domain blocklist matches found")
+            except Exception as e:
+                print(f"  - C2 domain blocklist correlation error (non-fatal): {e}")
         
         # ✅ PRIORITY 2: Change Point Detection
         print("[18/24] Detecting traffic change points (CPD)...")

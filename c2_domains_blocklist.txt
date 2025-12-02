@@ -1,0 +1,23 @@
+################################################################
+# C2 Domain Blocklist - Manual List                            #
+# Add malicious domains below (one per line)                   #
+# Lines starting with # are comments                           #
+# Supports formats:                                            #
+#   - domain.com (plain domain)                                #
+#   - 127.0.0.1	domain.com (hosts file format)                #
+################################################################
+#
+# ThreatFox IOCs examples:
+demure.de5per5eem.ru
+peren5.de5per5eem.ru
+depra.de5per5eem.ru
+deepem.de5per5eem.ru
+benra8.be8ref7ain.ru
+abqsales.com
+billing.keywordmatters.com
+refayn.be8ref7ain.ru
+breez5.be8ref7ain.ru
+rainel.be8ref7ain.ru
+#
+# Add your malicious domains below:
+#

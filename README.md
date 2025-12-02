@@ -499,6 +499,62 @@ print_c2_hits_table(hits)
 export_c2_hits_csv(hits, 'c2_matches.csv')
 ```
 
+## C2 Domain Blocklist Correlation
+
+The tool also includes domain-based threat detection for DNS, HTTP, and TLS traffic.
+
+### Pre-configured Domain Blocklist Sources
+
+| Source | URL |
+|--------|-----|
+| ThreatFox Hosts | https://threatfox.abuse.ch/downloads/hostfile/ |
+| URLhaus Domains | https://urlhaus.abuse.ch/downloads/text_online/ |
+
+### Adding Domains Manually
+
+Edit `c2_domains_blocklist.txt` to add malicious domains:
+
+```
+# Comment line
+demure.de5per5eem.ru
+billing.keywordmatters.com
+# Hosts file format also supported:
+127.0.0.1	malware.ru
+```
+
+### Domain Blocklist Output Columns
+
+| Column | Description |
+|--------|-------------|
+| PCAP_FILE | Name of the analyzed PCAP file |
+| PROTOCOL | Network protocol (DNS, HTTP, TLS) |
+| DOMAIN | The domain queried/accessed |
+| MATCHED_DOMAIN | The domain that matched the blocklist |
+| SRC_IP | Source IP address |
+| DST_IP | Destination IP address |
+| REPUTATION | Threat reputation (MALICIOUS) |
+
+### Usage Example
+
+```python
+from c2_domain_blocklist import load_c2_domains, correlate_c2_domains_from_pcap
+
+# Load domain blocklist
+c2_domains = load_c2_domains('c2_domains_blocklist.txt')
+
+# Correlate with parsed traffic
+hits = correlate_c2_domains_from_pcap(
+    dns_df=dns_data,
+    http_df=http_data,
+    tls_df=tls_data,
+    c2_domains=c2_domains,
+    pcap_file='capture.pcap'
+)
+
+# Print results
+print_c2_domain_hits_table(hits)
+```
+
 ## Performance
 
 - Single-pass PCAP parsing
