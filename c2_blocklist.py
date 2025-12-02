@@ -469,8 +469,15 @@ def load_c2_blocklist_from_url(url, timeout=30):
     """
     Load C2 IP blocklist from a URL.
     
+    Supports multiple formats:
+    - One IP per line (standard format)
+    - Tab-separated (DShield format: IP, count, attacks, etc.)
+    - IP:PORT format (Adwind/Qrypter format)
+    - CSV format (IP,port or IP;port)
+    - Lines with comments (#, ;)
+    
     Args:
-        url: URL to fetch the blocklist from (one IP per line format)
+        url: URL to fetch the blocklist from
         timeout: Request timeout in seconds (default: 30)
         
     Returns:
@@ -500,16 +507,39 @@ def load_c2_blocklist_from_url(url, timeout=30):
                 # Skip empty lines and comments
                 if not line or line.startswith('#') or line.startswith(';'):
                     continue
-                # Extract IP (handle lines with additional data)
-                ip = line.split()[0] if line else ''
-                # Also handle CSV format (IP,port or IP;port)
-                if ',' in ip:
-                    ip = ip.split(',')[0]
-                if ';' in ip:
-                    ip = ip.split(';')[0]
+                
+                # Try to extract IP from various formats
+                ip = None
+                
+                # Handle tab-separated format (DShield: IP\tcount\tattacks\tfirst\tlast)
+                if '\t' in line:
+                    parts = line.split('\t')
+                    ip = parts[0].strip() if parts else ''
+                # Handle IP:PORT format (Adwind/Qrypter)
+                elif ':' in line and not line.startswith('http'):
+                    ip = line.split(':')[0].strip()
+                # Handle space-separated format
+                elif ' ' in line:
+                    ip = line.split()[0].strip()
+                # Handle CSV format (IP,port or IP;port)
+                elif ',' in line:
+                    ip = line.split(',')[0].strip()
+                elif ';' in line:
+                    ip = line.split(';')[0].strip()
+                else:
+                    # Plain IP address
+                    ip = line.strip()
+                
+                # Additional cleanup - remove any remaining separators
+                if ip:
+                    # Remove port if still attached
+                    if ':' in ip:
+                        ip = ip.split(':')[0]
+                    # Remove trailing commas or semicolons
+                    ip = ip.rstrip(',;')
                     
-                if is_valid_ipv4(ip):
-                    c2_ips.add(ip)
+                    if is_valid_ipv4(ip):
+                        c2_ips.add(ip)
             
             print(f"[C2 Blocklist] Loaded {len(c2_ips)} C2 IPs from URL")
             
