@@ -74,7 +74,16 @@ KNOWN_C2_DOMAIN_URLS = {
     'threatfox_hosts': 'https://threatfox.abuse.ch/downloads/hostfile/',
     
     # URLhaus - Active malware distribution domains
-    'urlhaus_domains': 'https://urlhaus.abuse.ch/downloads/text_online/',
+    'urlhaus_domains_online': 'https://urlhaus.abuse.ch/downloads/text_online/',
+    
+    # URLhaus - All domains (text format)
+    'urlhaus_domains': 'https://urlhaus.abuse.ch/downloads/text/',
+    
+    # OpenPhish - Phishing URLs/domains
+    'openphish': 'https://openphish.com/feed.txt',
+    
+    # Malware Domain List - Known malicious domains (hosts format)
+    'malwaredomainlist': 'https://www.malwaredomainlist.com/hostslist/hosts.txt',
 }
 
 # -----------------------

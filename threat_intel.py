@@ -24,6 +24,8 @@ import json
 import os
 import time
 import hashlib
+import urllib.request
+import urllib.error
 from collections import defaultdict
 
 # Cache configuration
@@ -325,18 +327,175 @@ class ThreatIntelligence:
         return result
     
     def _check_virustotal_ip(self, ip):
-        """Check IP against VirusTotal (stub - requires actual API implementation)"""
-        # In production, this would make actual API calls
-        # For now, return None to indicate no API key or not implemented
-        return None
+        """
+        Check IP against VirusTotal API.
+        
+        Args:
+            ip: IP address to check
+            
+        Returns:
+            dict with detection status, score, categories, AS owner, country
+            or None on error
+        """
+        api_key = self.api_keys.get('virustotal')
+        if not api_key:
+            return None
+        
+        try:
+            url = f"https://www.virustotal.com/api/v3/ip_addresses/{ip}"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    'x-apikey': api_key,
+                    'Accept': 'application/json'
+                }
+            )
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode('utf-8', errors='replace'))
+            
+            attributes = data.get('data', {}).get('attributes', {})
+            stats = attributes.get('last_analysis_stats', {})
+            
+            malicious_count = stats.get('malicious', 0)
+            suspicious_count = stats.get('suspicious', 0)
+            
+            # Calculate score (0-100)
+            total = max(1, sum(stats.values()))
+            score = int((malicious_count + suspicious_count * 0.5) / total * 100)
+            
+            return {
+                'detected': malicious_count > 0 or suspicious_count > 0,
+                'score': score,
+                'malicious_count': malicious_count,
+                'suspicious_count': suspicious_count,
+                'categories': list(attributes.get('categories', {}).values()),
+                'as_owner': attributes.get('as_owner', 'Unknown'),
+                'country': attributes.get('country', 'Unknown'),
+            }
+            
+        except urllib.error.HTTPError as e:
+            print(f"[ThreatIntel] VirusTotal API error for {ip}: HTTP {e.code}")
+            return None
+        except urllib.error.URLError as e:
+            print(f"[ThreatIntel] VirusTotal connection error for {ip}: {e.reason}")
+            return None
+        except Exception as e:
+            print(f"[ThreatIntel] VirusTotal error for {ip}: {e}")
+            return None
     
     def _check_abuseipdb(self, ip):
-        """Check IP against AbuseIPDB (stub)"""
-        return None
+        """
+        Check IP against AbuseIPDB API.
+        
+        Args:
+            ip: IP address to check
+            
+        Returns:
+            dict with abuse confidence score, total reports, country, ISP, isTor
+            or None on error
+        """
+        api_key = self.api_keys.get('abuseipdb')
+        if not api_key:
+            return None
+        
+        try:
+            url = f"https://api.abuseipdb.com/api/v2/check?ipAddress={ip}&maxAgeInDays=90"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    'Key': api_key,
+                    'Accept': 'application/json'
+                }
+            )
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode('utf-8', errors='replace'))
+            
+            result_data = data.get('data', {})
+            abuse_score = result_data.get('abuseConfidenceScore', 0)
+            
+            return {
+                'detected': abuse_score > 50,
+                'abuse_score': abuse_score,
+                'total_reports': result_data.get('totalReports', 0),
+                'country': result_data.get('countryCode', 'Unknown'),
+                'isp': result_data.get('isp', 'Unknown'),
+                'is_tor': result_data.get('isTor', False),
+                'is_public': result_data.get('isPublic', True),
+                'last_reported': result_data.get('lastReportedAt'),
+            }
+            
+        except urllib.error.HTTPError as e:
+            print(f"[ThreatIntel] AbuseIPDB API error for {ip}: HTTP {e.code}")
+            return None
+        except urllib.error.URLError as e:
+            print(f"[ThreatIntel] AbuseIPDB connection error for {ip}: {e.reason}")
+            return None
+        except Exception as e:
+            print(f"[ThreatIntel] AbuseIPDB error for {ip}: {e}")
+            return None
     
     def _check_greynoise(self, ip):
-        """Check IP against GreyNoise (stub)"""
-        return None
+        """
+        Check IP against GreyNoise Community API.
+        
+        Args:
+            ip: IP address to check
+            
+        Returns:
+            dict with noise, riot, classification, name, last_seen
+            or None on error
+        """
+        api_key = self.api_keys.get('greynoise')
+        if not api_key:
+            return None
+        
+        try:
+            url = f"https://api.greynoise.io/v3/community/{ip}"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    'key': api_key,
+                    'Accept': 'application/json'
+                }
+            )
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode('utf-8', errors='replace'))
+            
+            classification = data.get('classification', 'unknown')
+            
+            return {
+                'detected': classification == 'malicious',
+                'noise': data.get('noise', False),
+                'riot': data.get('riot', False),
+                'classification': classification,
+                'name': data.get('name', 'Unknown'),
+                'last_seen': data.get('last_seen'),
+                'message': data.get('message', ''),
+            }
+            
+        except urllib.error.HTTPError as e:
+            # GreyNoise returns 404 for IPs not in their database
+            if e.code == 404:
+                return {
+                    'detected': False,
+                    'noise': False,
+                    'riot': False,
+                    'classification': 'unknown',
+                    'name': 'Not in GreyNoise database',
+                    'last_seen': None,
+                    'message': 'IP not found',
+                }
+            print(f"[ThreatIntel] GreyNoise API error for {ip}: HTTP {e.code}")
+            return None
+        except urllib.error.URLError as e:
+            print(f"[ThreatIntel] GreyNoise connection error for {ip}: {e.reason}")
+            return None
+        except Exception as e:
+            print(f"[ThreatIntel] GreyNoise error for {ip}: {e}")
+            return None
     
     def bulk_check_ips(self, ip_list):
         """
