@@ -419,6 +419,8 @@ The tool automatically fetches from these well-known threat intelligence sources
 | Feodo Tracker | https://feodotracker.abuse.ch/downloads/ipblocklist.txt | Tracks Emotet, Dridex, TrickBot, QakBot, BazarLoader |
 | SSL Blacklist | https://sslbl.abuse.ch/blacklist/sslipblacklist.txt | IPs with malicious SSL certificates |
 | Abuse.ch Recommended | https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt | Comprehensive botnet C2 list |
+| DShield | https://www.dshield.org/ipsascii.html?text | SANS Internet Storm Center - Top attackers |
+| Adwind/Qrypter | https://abuse.ch/downloads/blog/adwind_qrypter_c2s_20180409.txt | Adwind/Qrypter RAT C2 servers |
 
 ### Output Table Columns
 

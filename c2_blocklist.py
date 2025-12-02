@@ -84,6 +84,12 @@ KNOWN_C2_BLOCKLIST_URLS = {
     
     # Abuse.ch Botnet C2 IPs (recommended, comprehensive)
     'abuse_ch_botnet': 'https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt',
+    
+    # DShield - SANS Internet Storm Center blocklist (top attackers)
+    'dshield': 'https://www.dshield.org/ipsascii.html?text',
+    
+    # Abuse.ch Adwind/Qrypter RAT C2 servers
+    'adwind_qrypter': 'https://abuse.ch/downloads/blog/adwind_qrypter_c2s_20180409.txt',
 }
 
 # Import ASN enrichment module
