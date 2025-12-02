@@ -150,8 +150,9 @@ def get_ip_enrichment(ip):
                 # Check if marked as suspicious by ASN module
                 if asn_info.get('is_suspicious'):
                     result['reputation_detail'] += ' | Suspicious hosting'
-        except Exception as e:
-            pass  # Continue with defaults on error
+        except Exception:
+            # ASN enrichment failed, continue with defaults
+            pass
     
     # Get threat intelligence if available
     if THREAT_INTEL_AVAILABLE:
@@ -170,8 +171,9 @@ def get_ip_enrichment(ip):
                 elif threat_info.get('threat_score', 0) > 30:
                     result['reputation'] = 'SUSPICIOUS'
                     result['reputation_detail'] = f"Threat score: {threat_info.get('threat_score', 0)}"
-        except Exception as e:
-            pass  # Continue with defaults on error
+        except Exception:
+            # Threat intel lookup failed, continue with defaults
+            pass
     
     return result
 
@@ -499,6 +501,8 @@ if __name__ == "__main__":
     # Test CSV export
     print("3. Testing CSV export:")
     if not hits.empty:
-        export_c2_hits_csv(hits, '/tmp/c2_test_hits.csv')
+        import tempfile
+        temp_csv = os.path.join(tempfile.gettempdir(), 'c2_test_hits.csv')
+        export_c2_hits_csv(hits, temp_csv)
     
     print("\n✓ C2 Blocklist module ready")

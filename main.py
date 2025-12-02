@@ -5676,8 +5676,10 @@ def pipeline(pcap_sources=None):
                     print(f"  - 🚨 C2 blocklist matches: {len(c2_blocklist_hits)}")
                     # Print the table to console
                     print_c2_hits_table(c2_blocklist_hits)
-                    # Optionally export to CSV
-                    csv_path = export_c2_hits_csv(c2_blocklist_hits, 'c2_blocklist_hits.csv')
+                    # Export to CSV and report
+                    csv_file = export_c2_hits_csv(c2_blocklist_hits, 'c2_blocklist_hits.csv')
+                    if csv_file:
+                        print(f"  - Exported to: {csv_file}")
                 else:
                     print("  - No C2 blocklist matches found")
             except Exception as e:
