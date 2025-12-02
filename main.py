@@ -88,7 +88,8 @@ try:
         correlate_c2_ips_from_pcap,
         print_c2_hits_table,
         export_c2_hits_csv,
-        KNOWN_C2_BLOCKLIST_URLS
+        KNOWN_C2_BLOCKLIST_URLS,
+        get_ip_enrichment
     )
     C2_BLOCKLIST_AVAILABLE = True
     print("[INFO] C2 blocklist correlation enabled")
@@ -96,6 +97,7 @@ except ImportError as e:
     print(f"[INFO] C2 blocklist correlation not available (optional): {e}")
     load_c2_blocklist = load_c2_blocklist_from_urls = None
     correlate_c2_ips_from_pcap = print_c2_hits_table = export_c2_hits_csv = None
+    get_ip_enrichment = None
     KNOWN_C2_BLOCKLIST_URLS = {}
 
 # -----------------------
@@ -764,6 +766,83 @@ def agg(df, keys):
         return d
     except Exception:
         return df
+
+
+def enrich_dns_with_reputation(dns_df, c2_ips=None):
+    """
+    Enrich DNS aggregated data with resolved IP, ASN owner, and reputation score.
+    
+    Args:
+        dns_df: DataFrame with DNS data (must have DOMAIN column, optionally A column)
+        c2_ips: Set of known C2 IPs for reputation scoring (optional)
+        
+    Returns:
+        DataFrame with additional columns: RESOLVED_IP, ASN, ASN_OWNER, REPUTATION_SCORE
+    """
+    if dns_df.empty:
+        return dns_df
+    
+    # Add new columns
+    dns_df = dns_df.copy()
+    dns_df['RESOLVED_IP'] = ''
+    dns_df['ASN'] = 'N/A'
+    dns_df['ASN_OWNER'] = 'Unknown'
+    dns_df['REPUTATION_SCORE'] = 0
+    
+    # Check if we have the enrichment function available
+    if get_ip_enrichment is None:
+        print("[DNS Enrichment] Enrichment not available")
+        return dns_df
+    
+    print("[DNS Enrichment] Enriching DNS data with ASN and reputation...")
+    
+    # Get the original DNS data with A records if available
+    enrichment_cache = {}
+    
+    for idx, row in dns_df.iterrows():
+        domain = row.get('DOMAIN', '')
+        resolved_ip = row.get('A', '') if 'A' in dns_df.columns else ''
+        
+        # Store the resolved IP
+        if resolved_ip:
+            dns_df.at[idx, 'RESOLVED_IP'] = resolved_ip
+            
+            # Get enrichment for IP
+            if resolved_ip not in enrichment_cache:
+                try:
+                    enrichment_cache[resolved_ip] = get_ip_enrichment(resolved_ip)
+                except Exception:
+                    enrichment_cache[resolved_ip] = {
+                        'asn': 'N/A',
+                        'asn_owner': 'Unknown',
+                        'reputation': 'UNKNOWN'
+                    }
+            
+            enrichment = enrichment_cache[resolved_ip]
+            dns_df.at[idx, 'ASN'] = str(enrichment.get('asn', 'N/A'))
+            dns_df.at[idx, 'ASN_OWNER'] = enrichment.get('asn_owner', 'Unknown')
+            
+            # Calculate reputation score (0-100)
+            reputation = enrichment.get('reputation', 'UNKNOWN')
+            if reputation == 'MALICIOUS':
+                score = 100
+            elif reputation == 'SUSPICIOUS':
+                score = 50
+            else:
+                score = 0
+            
+            # Check if IP is in C2 blocklist
+            if c2_ips and resolved_ip in c2_ips:
+                score = 100  # Known C2 IP
+            
+            dns_df.at[idx, 'REPUTATION_SCORE'] = score
+    
+    enriched_count = len([s for s in dns_df['REPUTATION_SCORE'] if s > 0])
+    print(f"  - Enriched {len(dns_df)} domains, {enriched_count} with reputation scores > 0")
+    
+    return dns_df
+
+
 # -----------------------
 # C2 heuristics (JA3-based + basic checks)
 # -----------------------
@@ -4103,7 +4182,9 @@ function updateDashboard(){
   // ------------------------
   // TABLES
   // ------------------------
-  renderTableRows(document.querySelector('#tbl_dns tbody'), dnsSlice, ['DOMAIN','COUNT','PERCENT']);
+  // Enhanced DNS table with ASN owner and reputation score - sorted by reputation score descending
+  const dnsSortedByRep = dnsSlice.slice().sort((a,b)=>(b.REPUTATION_SCORE||0)-(a.REPUTATION_SCORE||0));
+  renderTableRows(document.querySelector('#tbl_dns tbody'), dnsSortedByRep, ['DOMAIN','RESOLVED_IP','ASN','ASN_OWNER','REPUTATION_SCORE','COUNT','PERCENT']);
   renderTableRows(document.querySelector('#tbl_http tbody'), httpSlice, ['DOMAIN','COUNT','PERCENT']);
   renderTableRows(document.querySelector('#tbl_tls tbody'), tlsSlice, ['SNI','JA3','SRC_IP','DST_IP','COUNT','PERCENT']);
   renderTableRows(document.querySelector('#tbl_tcp tbody'), tcpSliceFiltered, ['SRC_IP','DST_IP','FLAGS','COUNT','PERCENT']);
@@ -4905,9 +4986,9 @@ body.dark .stat-badge{
 
     <div class='card-grid'>
   <div class='card'>
-    <h3>DNS Top</h3>
+    <h3>DNS Top (Enhanced with ASN & Reputation)</h3>
     <div class='chart-box'><canvas id='chart_dns'></canvas></div>
-    <div class='table-wrap'><table id='tbl_dns' class='display'><thead><tr><th>DOMAIN</th><th>COUNT</th><th>%</th></tr></thead><tbody></tbody></table></div>
+    <div class='table-wrap'><table id='tbl_dns' class='display'><thead><tr><th>DOMAIN</th><th>RESOLVED_IP</th><th>ASN</th><th>ASN_OWNER</th><th>REP_SCORE</th><th>COUNT</th><th>%</th></tr></thead><tbody></tbody></table></div>
   </div>
   
   <div class='card'>
@@ -5561,7 +5642,22 @@ def pipeline(pcap_sources=None):
         pcap = pcap_sources[0][1] if pcap_sources else FILE_PCAP
 
         print("\n[2/20] Aggregating DNS...")
-        dnsA = agg(dns, ['DOMAIN'])
+        # Aggregate DNS including resolved IP (A record) for enrichment
+        if 'A' in dns.columns:
+            dnsA = agg(dns, ['DOMAIN', 'A'])
+        else:
+            dnsA = agg(dns, ['DOMAIN'])
+        
+        # ✅ NEW: Enrich DNS with ASN owner and reputation score
+        if C2_BLOCKLIST_AVAILABLE and not dnsA.empty:
+            print("[2b/20] Enriching DNS with ASN owner and reputation...")
+            # Load C2 blocklist for reputation scoring
+            try:
+                c2_blocklist_for_dns = load_c2_blocklist_from_urls(include_default=True, include_known_sources=True)
+                dnsA = enrich_dns_with_reputation(dnsA, c2_ips=c2_blocklist_for_dns)
+            except Exception as e:
+                print(f"  - DNS enrichment error (non-fatal): {e}")
+                dnsA = enrich_dns_with_reputation(dnsA, c2_ips=None)
 
         print("[3/20] Aggregating HTTP...")
         httpA = agg(http, ['DOMAIN'])

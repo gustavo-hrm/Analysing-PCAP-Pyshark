@@ -463,6 +463,8 @@ def correlate_c2_ips_from_pcap(tcp_df=None, http_df=None, dns_df=None, tls_df=No
     hits = []
     # Cache for IP enrichment to avoid repeated lookups
     enrichment_cache = {}
+    # Track all unique IPs verified from PCAP
+    verified_ips = set()
     
     def get_cached_enrichment(ip):
         """Get enrichment from cache or lookup"""
@@ -476,6 +478,12 @@ def correlate_c2_ips_from_pcap(tcp_df=None, http_df=None, dns_df=None, tls_df=No
         src_ip = str(row.get(src_ip_col, '')) if src_ip_col in row else ''
         dst_ip = str(row.get(dst_ip_col, '')) if dst_ip_col in row else ''
         port = int(row.get(port_col, default_port)) if port_col in row else default_port
+        
+        # Track verified IPs
+        if src_ip and is_valid_ipv4(src_ip):
+            verified_ips.add(src_ip)
+        if dst_ip and is_valid_ipv4(dst_ip):
+            verified_ips.add(dst_ip)
         
         # Check source IP
         if src_ip in c2_ips:
@@ -521,6 +529,8 @@ def correlate_c2_ips_from_pcap(tcp_df=None, http_df=None, dns_df=None, tls_df=No
     if dns_df is not None and not dns_df.empty:
         for _, row in dns_df.iterrows():
             resolved_ip = str(row.get('A', '')) if 'A' in row.index else ''
+            if resolved_ip and is_valid_ipv4(resolved_ip):
+                verified_ips.add(resolved_ip)
             if resolved_ip and resolved_ip in c2_ips:
                 domain = str(row.get('DOMAIN', '')) if 'DOMAIN' in row.index else ''
                 enrichment = get_cached_enrichment(resolved_ip)
@@ -545,6 +555,15 @@ def correlate_c2_ips_from_pcap(tcp_df=None, http_df=None, dns_df=None, tls_df=No
     if udp_df is not None and not udp_df.empty:
         for _, row in udp_df.iterrows():
             check_and_add_hit(row, 'UDP', port_col='DST_PORT')
+    
+    # Print debug output with verification statistics
+    matched_c2_ips = set(h['MATCHED_C2_IP'] for h in hits) if hits else set()
+    print(f"[C2 Blocklist] Verification Statistics:")
+    print(f"  - Blocklist IPs loaded: {len(c2_ips)}")
+    print(f"  - Unique IPs from PCAP verified: {len(verified_ips)}")
+    print(f"  - C2 IPs matched: {len(matched_c2_ips)}")
+    if matched_c2_ips:
+        print(f"  - Matched C2 IPs: {', '.join(sorted(matched_c2_ips))}")
     
     # Create DataFrame and deduplicate
     if hits:
