@@ -397,6 +397,164 @@ python3 main.py  # Run analysis with new signature
 
 To contribute threat intelligence integration, see `botnet_signatures.py` TODO comments.
 
+## C2 IP Blocklist Correlation
+
+The tool includes a C2 IP blocklist correlation feature that matches observed traffic against known Command & Control server IPs.
+
+### Features
+
+- **Automatic URL Fetching**: Downloads C2 IPs from known threat intelligence feeds (Feodo Tracker, SSL Blacklist)
+- **Multi-Protocol Correlation**: Scan TCP, HTTP, DNS, TLS, and UDP traffic
+- **ASN Enrichment**: Show ASN number and owner organization for matched IPs
+- **Reputation Scoring**: Classify matches as MALICIOUS, SUSPICIOUS, or UNKNOWN
+- **Dashboard Integration**: View matches in the web dashboard
+- **CSV Export**: Export matches to CSV for further analysis
+
+### Pre-configured C2 Blocklist Sources
+
+The tool automatically fetches from these well-known threat intelligence sources:
+
+| Source | URL | Description |
+|--------|-----|-------------|
+| Feodo Tracker | https://feodotracker.abuse.ch/downloads/ipblocklist.txt | Tracks Emotet, Dridex, TrickBot, QakBot, BazarLoader |
+| SSL Blacklist | https://sslbl.abuse.ch/blacklist/sslipblacklist.txt | IPs with malicious SSL certificates |
+| Abuse.ch Recommended | https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt | Comprehensive botnet C2 list |
+| DShield | https://www.dshield.org/ipsascii.html?text | SANS Internet Storm Center - Top attackers |
+| Adwind/Qrypter | https://abuse.ch/downloads/blog/adwind_qrypter_c2s_20180409.txt | Adwind/Qrypter RAT C2 servers |
+
+### Output Table Columns
+
+| Column | Description |
+|--------|-------------|
+| PCAP_FILE | Name of the analyzed PCAP file |
+| PROTOCOL | Network protocol (TCP, HTTP, DNS, TLS, UDP) |
+| SRC_IP | Source IP address |
+| DST_IP | Destination IP address |
+| DEST_PORT | Destination port |
+| MATCHED_C2_IP | The IP that matched the C2 blocklist |
+| ASN | Autonomous System Number of the matched IP |
+| ASN_OWNER | Organization that owns the ASN |
+| REPUTATION | Threat reputation (MALICIOUS, SUSPICIOUS, UNKNOWN) |
+
+### Configuring C2 Blocklist Sources
+
+#### Option 1: Use Pre-configured Sources (Recommended)
+The tool automatically fetches from known sources when you run the analysis:
+```python
+from c2_blocklist import load_c2_blocklist_from_urls
+
+# Load from all known sources (Feodo Tracker, SSL Blacklist, etc.)
+c2_ips = load_c2_blocklist_from_urls()
+```
+
+#### Option 2: Add Custom URLs
+Add your own blocklist URLs to `KNOWN_C2_BLOCKLIST_URLS` in `c2_blocklist.py`:
+```python
+KNOWN_C2_BLOCKLIST_URLS = {
+    'feodo_tracker': 'https://feodotracker.abuse.ch/downloads/ipblocklist.txt',
+    'sslbl': 'https://sslbl.abuse.ch/blacklist/sslipblacklist.txt',
+    # Add your custom sources here:
+    'my_custom_feed': 'https://example.com/my_blocklist.txt',
+}
+```
+
+#### Option 3: Load from Local File
+```python
+from c2_blocklist import load_c2_blocklist
+
+# Load from a local file
+c2_ips = load_c2_blocklist('my_c2_list.txt')
+```
+
+#### Option 4: Add Hardcoded IPs
+Add IPs to `DEFAULT_C2_IPS` set in `c2_blocklist.py`:
+```python
+DEFAULT_C2_IPS = {
+    "45.33.32.156",
+    "104.131.74.14",
+    # Add more IPs here
+}
+```
+
+### Usage Example
+
+```python
+from c2_blocklist import load_c2_blocklist_from_urls, correlate_c2_ips_from_pcap
+
+# Load blocklist from all known sources + defaults
+c2_ips = load_c2_blocklist_from_urls()
+
+# Correlate with parsed traffic
+hits = correlate_c2_ips_from_pcap(
+    tcp_df=tcp_data,
+    http_df=http_data, 
+    c2_ips=c2_ips,
+    pcap_file='capture.pcap'
+)
+
+# Print results
+print_c2_hits_table(hits)
+
+# Export to CSV
+export_c2_hits_csv(hits, 'c2_matches.csv')
+```
+
+## C2 Domain Blocklist Correlation
+
+The tool also includes domain-based threat detection for DNS, HTTP, and TLS traffic.
+
+### Pre-configured Domain Blocklist Sources
+
+| Source | URL |
+|--------|-----|
+| ThreatFox Hosts | https://threatfox.abuse.ch/downloads/hostfile/ |
+| URLhaus Domains | https://urlhaus.abuse.ch/downloads/text_online/ |
+
+### Adding Domains Manually
+
+Edit `c2_domains_blocklist.txt` to add malicious domains:
+
+```
+# Comment line
+demure.de5per5eem.ru
+billing.keywordmatters.com
+# Hosts file format also supported:
+127.0.0.1	malware.ru
+```
+
+### Domain Blocklist Output Columns
+
+| Column | Description |
+|--------|-------------|
+| PCAP_FILE | Name of the analyzed PCAP file |
+| PROTOCOL | Network protocol (DNS, HTTP, TLS) |
+| DOMAIN | The domain queried/accessed |
+| MATCHED_DOMAIN | The domain that matched the blocklist |
+| SRC_IP | Source IP address |
+| DST_IP | Destination IP address |
+| REPUTATION | Threat reputation (MALICIOUS) |
+
+### Usage Example
+
+```python
+from c2_domain_blocklist import load_c2_domains, correlate_c2_domains_from_pcap
+
+# Load domain blocklist
+c2_domains = load_c2_domains('c2_domains_blocklist.txt')
+
+# Correlate with parsed traffic
+hits = correlate_c2_domains_from_pcap(
+    dns_df=dns_data,
+    http_df=http_data,
+    tls_df=tls_data,
+    c2_domains=c2_domains,
+    pcap_file='capture.pcap'
+)
+
+# Print results
+print_c2_domain_hits_table(hits)
+```
+
 ## Performance
 
 - Single-pass PCAP parsing

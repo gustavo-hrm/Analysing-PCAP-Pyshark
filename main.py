@@ -79,6 +79,44 @@ except ImportError as e:
     print(f"[INFO] Enhanced C2 detection not available (optional): {e}")
     enhance_c2_detection = generate_host_summary_report = generate_c2_conclusion_report = None
 
+# C2 Blocklist correlation imports
+C2_BLOCKLIST_AVAILABLE = False
+try:
+    from c2_blocklist import (
+        load_c2_blocklist,
+        load_c2_blocklist_from_urls,
+        correlate_c2_ips_from_pcap,
+        print_c2_hits_table,
+        export_c2_hits_csv,
+        KNOWN_C2_BLOCKLIST_URLS,
+        get_ip_enrichment
+    )
+    C2_BLOCKLIST_AVAILABLE = True
+    print("[INFO] C2 blocklist correlation enabled")
+except ImportError as e:
+    print(f"[INFO] C2 blocklist correlation not available (optional): {e}")
+    load_c2_blocklist = load_c2_blocklist_from_urls = None
+    correlate_c2_ips_from_pcap = print_c2_hits_table = export_c2_hits_csv = None
+    get_ip_enrichment = None
+    KNOWN_C2_BLOCKLIST_URLS = {}
+
+# C2 Domain Blocklist correlation imports
+C2_DOMAIN_BLOCKLIST_AVAILABLE = False
+try:
+    from c2_domain_blocklist import (
+        load_c2_domains,
+        load_c2_domains_from_urls,
+        correlate_c2_domains_from_pcap,
+        print_c2_domain_hits_table,
+        export_c2_domain_hits_csv
+    )
+    C2_DOMAIN_BLOCKLIST_AVAILABLE = True
+    print("[INFO] C2 domain blocklist correlation enabled")
+except ImportError as e:
+    print(f"[INFO] C2 domain blocklist correlation not available (optional): {e}")
+    load_c2_domains = load_c2_domains_from_urls = None
+    correlate_c2_domains_from_pcap = print_c2_domain_hits_table = export_c2_domain_hits_csv = None
+
 # -----------------------
 # CONFIG
 # -----------------------
@@ -745,6 +783,83 @@ def agg(df, keys):
         return d
     except Exception:
         return df
+
+
+def enrich_dns_with_reputation(dns_df, c2_ips=None):
+    """
+    Enrich DNS aggregated data with resolved IP, ASN owner, and reputation score.
+    
+    Args:
+        dns_df: DataFrame with DNS data (must have DOMAIN column, optionally A column)
+        c2_ips: Set of known C2 IPs for reputation scoring (optional)
+        
+    Returns:
+        DataFrame with additional columns: RESOLVED_IP, ASN, ASN_OWNER, REPUTATION_SCORE
+    """
+    if dns_df.empty:
+        return dns_df
+    
+    # Add new columns
+    dns_df = dns_df.copy()
+    dns_df['RESOLVED_IP'] = ''
+    dns_df['ASN'] = 'N/A'
+    dns_df['ASN_OWNER'] = 'Unknown'
+    dns_df['REPUTATION_SCORE'] = 0
+    
+    # Check if we have the enrichment function available
+    if get_ip_enrichment is None:
+        print("[DNS Enrichment] Enrichment not available")
+        return dns_df
+    
+    print("[DNS Enrichment] Enriching DNS data with ASN and reputation...")
+    
+    # Get the original DNS data with A records if available
+    enrichment_cache = {}
+    
+    for idx, row in dns_df.iterrows():
+        domain = row.get('DOMAIN', '')
+        resolved_ip = row.get('A', '') if 'A' in dns_df.columns else ''
+        
+        # Store the resolved IP
+        if resolved_ip:
+            dns_df.at[idx, 'RESOLVED_IP'] = resolved_ip
+            
+            # Get enrichment for IP
+            if resolved_ip not in enrichment_cache:
+                try:
+                    enrichment_cache[resolved_ip] = get_ip_enrichment(resolved_ip)
+                except Exception:
+                    enrichment_cache[resolved_ip] = {
+                        'asn': 'N/A',
+                        'asn_owner': 'Unknown',
+                        'reputation': 'UNKNOWN'
+                    }
+            
+            enrichment = enrichment_cache[resolved_ip]
+            dns_df.at[idx, 'ASN'] = str(enrichment.get('asn', 'N/A'))
+            dns_df.at[idx, 'ASN_OWNER'] = enrichment.get('asn_owner', 'Unknown')
+            
+            # Calculate reputation score (0-100)
+            reputation = enrichment.get('reputation', 'UNKNOWN')
+            if reputation == 'MALICIOUS':
+                score = 100
+            elif reputation == 'SUSPICIOUS':
+                score = 50
+            else:
+                score = 0
+            
+            # Check if IP is in C2 blocklist
+            if c2_ips and resolved_ip in c2_ips:
+                score = 100  # Known C2 IP
+            
+            dns_df.at[idx, 'REPUTATION_SCORE'] = score
+    
+    enriched_count = len([s for s in dns_df['REPUTATION_SCORE'] if s > 0])
+    print(f"  - Enriched {len(dns_df)} domains, {enriched_count} with reputation scores > 0")
+    
+    return dns_df
+
+
 # -----------------------
 # C2 heuristics (JA3-based + basic checks)
 # -----------------------
@@ -3864,6 +3979,7 @@ const c2FullData    = %%C2FULL%%;
 const c2EnhancedData = %%C2ENHANCED%%;
 const c2HostSummaryData = %%C2HOSTSUMMARY%%;
 const c2ConclusionData = %%C2CONCLUSION%%;
+const c2BlocklistData = %%C2BLOCKLIST%%;
 
 const advData       = %%ADV%%;
 const beaconData    = %%BEACON%%;
@@ -4083,7 +4199,9 @@ function updateDashboard(){
   // ------------------------
   // TABLES
   // ------------------------
-  renderTableRows(document.querySelector('#tbl_dns tbody'), dnsSlice, ['DOMAIN','COUNT','PERCENT']);
+  // Enhanced DNS table with ASN owner and reputation score - sorted by reputation score descending
+  const dnsSortedByRep = dnsSlice.slice().sort((a,b)=>(b.REPUTATION_SCORE||0)-(a.REPUTATION_SCORE||0));
+  renderTableRows(document.querySelector('#tbl_dns tbody'), dnsSortedByRep, ['DOMAIN','RESOLVED_IP','ASN','ASN_OWNER','REPUTATION_SCORE','COUNT','PERCENT']);
   renderTableRows(document.querySelector('#tbl_http tbody'), httpSlice, ['DOMAIN','COUNT','PERCENT']);
   renderTableRows(document.querySelector('#tbl_tls tbody'), tlsSlice, ['SNI','JA3','SRC_IP','DST_IP','COUNT','PERCENT']);
   renderTableRows(document.querySelector('#tbl_tcp tbody'), tcpSliceFiltered, ['SRC_IP','DST_IP','FLAGS','COUNT','PERCENT']);
@@ -4116,6 +4234,26 @@ function updateDashboard(){
     document.getElementById('c2_confirmed').textContent = stats.confirmed_c2 || 0;
     document.getElementById('c2_likely').textContent = stats.likely_c2 || 0;
     document.getElementById('c2_needs_review').textContent = stats.needs_review || 0;
+  }
+
+  // ✅ NEW: C2 Blocklist Correlation table
+  if(document.querySelector('#tbl_c2_blocklist tbody')) {
+    const c2BlocklistSlice = (c2BlocklistData||[]).slice().sort((a,b)=>{
+      // Sort by reputation (MALICIOUS first), then by protocol
+      const repOrder = {'MALICIOUS': 0, 'SUSPICIOUS': 1, 'UNKNOWN': 2};
+      return (repOrder[a.REPUTATION]||99) - (repOrder[b.REPUTATION]||99);
+    }).slice(0,topN);
+    renderTableRows(document.querySelector('#tbl_c2_blocklist tbody'), c2BlocklistSlice,
+      ['PCAP_FILE','PROTOCOL','SRC_IP','DST_IP','DEST_PORT','MATCHED_C2_IP','ASN','ASN_OWNER','REPUTATION']);
+  }
+  
+  // Update C2 blocklist summary stats
+  if(c2BlocklistData && c2BlocklistData.length > 0) {
+    const blocklistElem = document.getElementById('c2_blocklist_count');
+    if(blocklistElem) blocklistElem.textContent = c2BlocklistData.length;
+    const maliciousCount = c2BlocklistData.filter(d => d.REPUTATION === 'MALICIOUS').length;
+    const maliciousElem = document.getElementById('c2_blocklist_malicious');
+    if(maliciousElem) maliciousElem.textContent = maliciousCount;
   }
 
   renderTableRows(document.querySelector('#tbl_adv tbody'), (advData||[]).filter(ff).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT']);
@@ -4865,9 +5003,9 @@ body.dark .stat-badge{
 
     <div class='card-grid'>
   <div class='card'>
-    <h3>DNS Top</h3>
+    <h3>DNS Top (Enhanced with ASN & Reputation)</h3>
     <div class='chart-box'><canvas id='chart_dns'></canvas></div>
-    <div class='table-wrap'><table id='tbl_dns' class='display'><thead><tr><th>DOMAIN</th><th>COUNT</th><th>%</th></tr></thead><tbody></tbody></table></div>
+    <div class='table-wrap'><table id='tbl_dns' class='display'><thead><tr><th>DOMAIN</th><th>RESOLVED_IP</th><th>ASN</th><th>ASN_OWNER</th><th>REP_SCORE</th><th>COUNT</th><th>%</th></tr></thead><tbody></tbody></table></div>
   </div>
   
   <div class='card'>
@@ -5177,6 +5315,26 @@ body.dark .stat-badge{
     <th>Source Host</th><th>C2 Destinations</th><th>Classification</th><th>Avg Confidence</th>
     <th>C2 IPs</th><th>Primary Indicators</th><th>Recommended Action</th>
     <th>Priority</th><th>Detections</th>
+  </tr></thead><tbody></tbody></table></div>
+</div>
+
+<!-- ✅ NEW: C2 Blocklist Correlation Table -->
+<div style='margin-top:18px' class='card'>
+  <h3>🚨 C2 Blocklist Matches</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Traffic matched against known C2/Botnet IP blocklists with ASN owner and reputation information</p>
+  <div style='display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 0;margin-bottom:12px;'>
+    <div style='text-align:center;padding:12px;background:linear-gradient(135deg, rgba(220, 38, 38, 0.1), rgba(239, 68, 68, 0.1));border-radius:var(--radius-sm);'>
+      <div style='font-size:24px;font-weight:bold;color:#dc2626' id='c2_blocklist_count'>0</div>
+      <div style='font-size:10px;color:var(--text-secondary);margin-top:4px;font-weight:600'>Total Blocklist Matches</div>
+    </div>
+    <div style='text-align:center;padding:12px;background:linear-gradient(135deg, rgba(239, 68, 68, 0.1), rgba(185, 28, 28, 0.1));border-radius:var(--radius-sm);'>
+      <div style='font-size:24px;font-weight:bold;color:#b91c1c' id='c2_blocklist_malicious'>0</div>
+      <div style='font-size:10px;color:var(--text-secondary);margin-top:4px;font-weight:600'>Malicious IPs</div>
+    </div>
+  </div>
+  <div class='table-wrap'><table id='tbl_c2_blocklist' class='display'><thead><tr>
+    <th>PCAP File</th><th>Protocol</th><th>Source IP</th><th>Dest IP</th><th>Dest Port</th>
+    <th>Matched C2 IP</th><th>ASN</th><th>ASN Owner</th><th>Reputation</th>
   </tr></thead><tbody></tbody></table></div>
 </div>
 
@@ -5501,7 +5659,22 @@ def pipeline(pcap_sources=None):
         pcap = pcap_sources[0][1] if pcap_sources else FILE_PCAP
 
         print("\n[2/20] Aggregating DNS...")
-        dnsA = agg(dns, ['DOMAIN'])
+        # Aggregate DNS including resolved IP (A record) for enrichment
+        if 'A' in dns.columns:
+            dnsA = agg(dns, ['DOMAIN', 'A'])
+        else:
+            dnsA = agg(dns, ['DOMAIN'])
+        
+        # ✅ NEW: Enrich DNS with ASN owner and reputation score
+        if C2_BLOCKLIST_AVAILABLE and not dnsA.empty:
+            print("[2b/20] Enriching DNS with ASN owner and reputation...")
+            # Load C2 blocklist for reputation scoring
+            try:
+                c2_blocklist_for_dns = load_c2_blocklist_from_urls(include_default=True, include_known_sources=True)
+                dnsA = enrich_dns_with_reputation(dnsA, c2_ips=c2_blocklist_for_dns)
+            except Exception as e:
+                print(f"  - DNS enrichment error (non-fatal): {e}")
+                dnsA = enrich_dns_with_reputation(dnsA, c2_ips=None)
 
         print("[3/20] Aggregating HTTP...")
         httpA = agg(http, ['DOMAIN'])
@@ -5596,6 +5769,74 @@ def pipeline(pcap_sources=None):
         print("[17/20] Detecting IP lists in TCP payloads (all protocols)...")
         tcp_ip_dist = detect_tcp_ip_distribution(tcp)  # Use RAW tcp, not aggregated
         print(f"  - TCP IP distributions found: {len(tcp_ip_dist)}")
+        
+        # ✅ NEW: C2 Blocklist Correlation
+        c2_blocklist_hits = pd.DataFrame()
+        if C2_BLOCKLIST_AVAILABLE:
+            print("[17b/20] Correlating traffic with C2 blocklist...")
+            try:
+                # Load C2 blocklist from known sources (Feodo Tracker, SSL Blacklist, etc.)
+                # This fetches live data from well-known threat intelligence feeds
+                print("  - Fetching C2 blocklists from known threat intel sources...")
+                c2_blocklist = load_c2_blocklist_from_urls(
+                    include_default=True,           # Include hardcoded IPs
+                    include_known_sources=True      # Fetch from Feodo Tracker, SSL Blacklist, etc.
+                )
+                
+                # Correlate all traffic against blocklist
+                c2_blocklist_hits = correlate_c2_ips_from_pcap(
+                    tcp_df=tcp,
+                    http_df=http,
+                    dns_df=dns,
+                    tls_df=tls,
+                    udp_df=udp,
+                    c2_ips=c2_blocklist,
+                    pcap_file=os.path.basename(pcap)
+                )
+                
+                if not c2_blocklist_hits.empty:
+                    print(f"  - 🚨 C2 blocklist matches: {len(c2_blocklist_hits)}")
+                    # Print the table to console
+                    print_c2_hits_table(c2_blocklist_hits)
+                    # Export to CSV and report
+                    csv_file = export_c2_hits_csv(c2_blocklist_hits, 'c2_blocklist_hits.csv')
+                    if csv_file:
+                        print(f"  - Exported to: {csv_file}")
+                else:
+                    print("  - No C2 blocklist matches found")
+            except Exception as e:
+                print(f"  - C2 blocklist correlation error (non-fatal): {e}")
+        
+        # ✅ NEW: C2 Domain Blocklist Correlation
+        c2_domain_hits = pd.DataFrame()
+        if C2_DOMAIN_BLOCKLIST_AVAILABLE:
+            print("[17c/20] Correlating traffic with C2 domain blocklist...")
+            try:
+                # Load C2 domain blocklist from file and defaults
+                print("  - Loading C2 domain blocklist...")
+                c2_domains = load_c2_domains('c2_domains_blocklist.txt', include_default=True)
+                
+                # Correlate DNS, HTTP, TLS traffic against domain blocklist
+                c2_domain_hits = correlate_c2_domains_from_pcap(
+                    dns_df=dns,
+                    http_df=http,
+                    tls_df=tls,
+                    c2_domains=c2_domains,
+                    pcap_file=os.path.basename(pcap)
+                )
+                
+                if not c2_domain_hits.empty:
+                    print(f"  - 🚨 C2 domain blocklist matches: {len(c2_domain_hits)}")
+                    # Print the table to console
+                    print_c2_domain_hits_table(c2_domain_hits)
+                    # Export to CSV
+                    csv_file = export_c2_domain_hits_csv(c2_domain_hits, 'c2_domain_hits.csv')
+                    if csv_file:
+                        print(f"  - Exported to: {csv_file}")
+                else:
+                    print("  - No C2 domain blocklist matches found")
+            except Exception as e:
+                print(f"  - C2 domain blocklist correlation error (non-fatal): {e}")
         
         # ✅ PRIORITY 2: Change Point Detection
         print("[18/24] Detecting traffic change points (CPD)...")
@@ -5829,6 +6070,7 @@ def pipeline(pcap_sources=None):
             .replace('%%C2ENHANCED%%', safe_js_json(c2_enhanced.to_dict(orient='records') if not c2_enhanced.empty else []))
             .replace('%%C2HOSTSUMMARY%%', safe_js_json(c2_host_summary.to_dict(orient='records') if not c2_host_summary.empty else []))
             .replace('%%C2CONCLUSION%%', safe_js_json(c2_conclusion if c2_conclusion else {}))
+            .replace('%%C2BLOCKLIST%%', safe_js_json(c2_blocklist_hits.to_dict(orient='records') if not c2_blocklist_hits.empty else []))
             .replace('%%ADV%%', safe_js_json(adv.to_dict(orient='records')))
             .replace('%%BEACON%%', safe_js_json(beacon.to_dict(orient='records')))
             .replace('%%DNSTUNNEL%%', safe_js_json(dnstunnel.to_dict(orient='records')))
@@ -5880,6 +6122,14 @@ def pipeline(pcap_sources=None):
             print(f"ML DDoS Predictions: {len(ml_ddos[ml_ddos['PREDICTION'] == 'ATTACK'])}")
         if not ml_anomalies.empty:
             print(f"ML Anomalies: {len(ml_anomalies)}")
+        
+        # C2 Blocklist Summary
+        if not c2_blocklist_hits.empty:
+            print(f"\n🚨 C2 BLOCKLIST MATCHES: {len(c2_blocklist_hits)}")
+            malicious_count = len(c2_blocklist_hits[c2_blocklist_hits['REPUTATION'] == 'MALICIOUS'])
+            print(f"   - Malicious: {malicious_count}")
+            unique_c2_ips = c2_blocklist_hits['MATCHED_C2_IP'].nunique()
+            print(f"   - Unique C2 IPs: {unique_c2_ips}")
         
         # Priority 2 summaries
         print("\n=== Priority 2 Features ===")
