@@ -79,6 +79,21 @@ except ImportError as e:
     print(f"[INFO] Enhanced C2 detection not available (optional): {e}")
     enhance_c2_detection = generate_host_summary_report = generate_c2_conclusion_report = None
 
+# C2 Blocklist correlation imports
+C2_BLOCKLIST_AVAILABLE = False
+try:
+    from c2_blocklist import (
+        load_c2_blocklist,
+        correlate_c2_ips_from_pcap,
+        print_c2_hits_table,
+        export_c2_hits_csv
+    )
+    C2_BLOCKLIST_AVAILABLE = True
+    print("[INFO] C2 blocklist correlation enabled")
+except ImportError as e:
+    print(f"[INFO] C2 blocklist correlation not available (optional): {e}")
+    load_c2_blocklist = correlate_c2_ips_from_pcap = print_c2_hits_table = export_c2_hits_csv = None
+
 # -----------------------
 # CONFIG
 # -----------------------
@@ -3864,6 +3879,7 @@ const c2FullData    = %%C2FULL%%;
 const c2EnhancedData = %%C2ENHANCED%%;
 const c2HostSummaryData = %%C2HOSTSUMMARY%%;
 const c2ConclusionData = %%C2CONCLUSION%%;
+const c2BlocklistData = %%C2BLOCKLIST%%;
 
 const advData       = %%ADV%%;
 const beaconData    = %%BEACON%%;
@@ -4116,6 +4132,26 @@ function updateDashboard(){
     document.getElementById('c2_confirmed').textContent = stats.confirmed_c2 || 0;
     document.getElementById('c2_likely').textContent = stats.likely_c2 || 0;
     document.getElementById('c2_needs_review').textContent = stats.needs_review || 0;
+  }
+
+  // ✅ NEW: C2 Blocklist Correlation table
+  if(document.querySelector('#tbl_c2_blocklist tbody')) {
+    const c2BlocklistSlice = (c2BlocklistData||[]).slice().sort((a,b)=>{
+      // Sort by reputation (MALICIOUS first), then by protocol
+      const repOrder = {'MALICIOUS': 0, 'SUSPICIOUS': 1, 'UNKNOWN': 2};
+      return (repOrder[a.REPUTATION]||99) - (repOrder[b.REPUTATION]||99);
+    }).slice(0,topN);
+    renderTableRows(document.querySelector('#tbl_c2_blocklist tbody'), c2BlocklistSlice,
+      ['PCAP_FILE','PROTOCOL','SRC_IP','DST_IP','DEST_PORT','MATCHED_C2_IP','ASN','ASN_OWNER','REPUTATION']);
+  }
+  
+  // Update C2 blocklist summary stats
+  if(c2BlocklistData && c2BlocklistData.length > 0) {
+    const blocklistElem = document.getElementById('c2_blocklist_count');
+    if(blocklistElem) blocklistElem.textContent = c2BlocklistData.length;
+    const maliciousCount = c2BlocklistData.filter(d => d.REPUTATION === 'MALICIOUS').length;
+    const maliciousElem = document.getElementById('c2_blocklist_malicious');
+    if(maliciousElem) maliciousElem.textContent = maliciousCount;
   }
 
   renderTableRows(document.querySelector('#tbl_adv tbody'), (advData||[]).filter(ff).slice(0,topN), ['INDICATOR','TYPE','SCORE','COUNT']);
@@ -5180,6 +5216,26 @@ body.dark .stat-badge{
   </tr></thead><tbody></tbody></table></div>
 </div>
 
+<!-- ✅ NEW: C2 Blocklist Correlation Table -->
+<div style='margin-top:18px' class='card'>
+  <h3>🚨 C2 Blocklist Matches</h3>
+  <p style='font-size:10px;opacity:0.8;margin-bottom:8px'>Traffic matched against known C2/Botnet IP blocklists with ASN owner and reputation information</p>
+  <div style='display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 0;margin-bottom:12px;'>
+    <div style='text-align:center;padding:12px;background:linear-gradient(135deg, rgba(220, 38, 38, 0.1), rgba(239, 68, 68, 0.1));border-radius:var(--radius-sm);'>
+      <div style='font-size:24px;font-weight:bold;color:#dc2626' id='c2_blocklist_count'>0</div>
+      <div style='font-size:10px;color:var(--text-secondary);margin-top:4px;font-weight:600'>Total Blocklist Matches</div>
+    </div>
+    <div style='text-align:center;padding:12px;background:linear-gradient(135deg, rgba(239, 68, 68, 0.1), rgba(185, 28, 28, 0.1));border-radius:var(--radius-sm);'>
+      <div style='font-size:24px;font-weight:bold;color:#b91c1c' id='c2_blocklist_malicious'>0</div>
+      <div style='font-size:10px;color:var(--text-secondary);margin-top:4px;font-weight:600'>Malicious IPs</div>
+    </div>
+  </div>
+  <div class='table-wrap'><table id='tbl_c2_blocklist' class='display'><thead><tr>
+    <th>PCAP File</th><th>Protocol</th><th>Source IP</th><th>Dest IP</th><th>Dest Port</th>
+    <th>Matched C2 IP</th><th>ASN</th><th>ASN Owner</th><th>Reputation</th>
+  </tr></thead><tbody></tbody></table></div>
+</div>
+
 <div style='margin-top:18px' class='card'>
   <h3>Pivot (Source → Destination)</h3>
   <div class='table-wrap'><table id='pivot' class='display'><thead><tr><th>SRC</th><th>DST</th><th>COUNT</th></tr></thead><tbody></tbody></table></div>
@@ -5597,6 +5653,36 @@ def pipeline(pcap_sources=None):
         tcp_ip_dist = detect_tcp_ip_distribution(tcp)  # Use RAW tcp, not aggregated
         print(f"  - TCP IP distributions found: {len(tcp_ip_dist)}")
         
+        # ✅ NEW: C2 Blocklist Correlation
+        c2_blocklist_hits = pd.DataFrame()
+        if C2_BLOCKLIST_AVAILABLE:
+            print("[17b/20] Correlating traffic with C2 blocklist...")
+            try:
+                # Load C2 blocklist (default + any external file)
+                c2_blocklist = load_c2_blocklist()
+                
+                # Correlate all traffic against blocklist
+                c2_blocklist_hits = correlate_c2_ips_from_pcap(
+                    tcp_df=tcp,
+                    http_df=http,
+                    dns_df=dns,
+                    tls_df=tls,
+                    udp_df=udp,
+                    c2_ips=c2_blocklist,
+                    pcap_file=os.path.basename(pcap)
+                )
+                
+                if not c2_blocklist_hits.empty:
+                    print(f"  - 🚨 C2 blocklist matches: {len(c2_blocklist_hits)}")
+                    # Print the table to console
+                    print_c2_hits_table(c2_blocklist_hits)
+                    # Optionally export to CSV
+                    csv_path = export_c2_hits_csv(c2_blocklist_hits, 'c2_blocklist_hits.csv')
+                else:
+                    print("  - No C2 blocklist matches found")
+            except Exception as e:
+                print(f"  - C2 blocklist correlation error (non-fatal): {e}")
+        
         # ✅ PRIORITY 2: Change Point Detection
         print("[18/24] Detecting traffic change points (CPD)...")
         change_points = []
@@ -5829,6 +5915,7 @@ def pipeline(pcap_sources=None):
             .replace('%%C2ENHANCED%%', safe_js_json(c2_enhanced.to_dict(orient='records') if not c2_enhanced.empty else []))
             .replace('%%C2HOSTSUMMARY%%', safe_js_json(c2_host_summary.to_dict(orient='records') if not c2_host_summary.empty else []))
             .replace('%%C2CONCLUSION%%', safe_js_json(c2_conclusion if c2_conclusion else {}))
+            .replace('%%C2BLOCKLIST%%', safe_js_json(c2_blocklist_hits.to_dict(orient='records') if not c2_blocklist_hits.empty else []))
             .replace('%%ADV%%', safe_js_json(adv.to_dict(orient='records')))
             .replace('%%BEACON%%', safe_js_json(beacon.to_dict(orient='records')))
             .replace('%%DNSTUNNEL%%', safe_js_json(dnstunnel.to_dict(orient='records')))
@@ -5880,6 +5967,14 @@ def pipeline(pcap_sources=None):
             print(f"ML DDoS Predictions: {len(ml_ddos[ml_ddos['PREDICTION'] == 'ATTACK'])}")
         if not ml_anomalies.empty:
             print(f"ML Anomalies: {len(ml_anomalies)}")
+        
+        # C2 Blocklist Summary
+        if not c2_blocklist_hits.empty:
+            print(f"\n🚨 C2 BLOCKLIST MATCHES: {len(c2_blocklist_hits)}")
+            malicious_count = len(c2_blocklist_hits[c2_blocklist_hits['REPUTATION'] == 'MALICIOUS'])
+            print(f"   - Malicious: {malicious_count}")
+            unique_c2_ips = c2_blocklist_hits['MATCHED_C2_IP'].nunique()
+            print(f"   - Unique C2 IPs: {unique_c2_ips}")
         
         # Priority 2 summaries
         print("\n=== Priority 2 Features ===")

@@ -397,6 +397,72 @@ python3 main.py  # Run analysis with new signature
 
 To contribute threat intelligence integration, see `botnet_signatures.py` TODO comments.
 
+## C2 IP Blocklist Correlation
+
+The tool includes a C2 IP blocklist correlation feature that matches observed traffic against known Command & Control server IPs.
+
+### Features
+
+- **Blocklist Loading**: Load C2 IPs from text files, hardcoded defaults, or external feeds
+- **Multi-Protocol Correlation**: Scan TCP, HTTP, DNS, TLS, and UDP traffic
+- **ASN Enrichment**: Show ASN number and owner organization for matched IPs
+- **Reputation Scoring**: Classify matches as MALICIOUS, SUSPICIOUS, or UNKNOWN
+- **Dashboard Integration**: View matches in the web dashboard
+- **CSV Export**: Export matches to CSV for further analysis
+
+### Output Table Columns
+
+| Column | Description |
+|--------|-------------|
+| PCAP_FILE | Name of the analyzed PCAP file |
+| PROTOCOL | Network protocol (TCP, HTTP, DNS, TLS, UDP) |
+| SRC_IP | Source IP address |
+| DST_IP | Destination IP address |
+| DEST_PORT | Destination port |
+| MATCHED_C2_IP | The IP that matched the C2 blocklist |
+| ASN | Autonomous System Number of the matched IP |
+| ASN_OWNER | Organization that owns the ASN |
+| REPUTATION | Threat reputation (MALICIOUS, SUSPICIOUS, UNKNOWN) |
+
+### Updating the C2 Blocklist
+
+1. **Text File**: Create a file with one IP per line (lines starting with # are comments)
+   ```
+   # Known C2 IPs
+   45.33.32.156
+   104.131.74.14
+   ```
+
+2. **Hardcoded**: Add IPs to `DEFAULT_C2_IPS` set in `c2_blocklist.py`
+
+3. **External Feed**: Download from recommended sources:
+   - Feodo Tracker: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+   - abuse.ch SSL Blacklist: https://sslbl.abuse.ch/blacklist/sslipblacklist.txt
+   - URLhaus: https://urlhaus.abuse.ch/downloads/text/
+
+### Usage Example
+
+```python
+from c2_blocklist import load_c2_blocklist, correlate_c2_ips_from_pcap
+
+# Load blocklist (defaults + optional external file)
+c2_ips = load_c2_blocklist('my_c2_list.txt')
+
+# Correlate with parsed traffic
+hits = correlate_c2_ips_from_pcap(
+    tcp_df=tcp_data,
+    http_df=http_data, 
+    c2_ips=c2_ips,
+    pcap_file='capture.pcap'
+)
+
+# Print results
+print_c2_hits_table(hits)
+
+# Export to CSV
+export_c2_hits_csv(hits, 'c2_matches.csv')
+```
+
 ## Performance
 
 - Single-pass PCAP parsing
