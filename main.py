@@ -84,15 +84,19 @@ C2_BLOCKLIST_AVAILABLE = False
 try:
     from c2_blocklist import (
         load_c2_blocklist,
+        load_c2_blocklist_from_urls,
         correlate_c2_ips_from_pcap,
         print_c2_hits_table,
-        export_c2_hits_csv
+        export_c2_hits_csv,
+        KNOWN_C2_BLOCKLIST_URLS
     )
     C2_BLOCKLIST_AVAILABLE = True
     print("[INFO] C2 blocklist correlation enabled")
 except ImportError as e:
     print(f"[INFO] C2 blocklist correlation not available (optional): {e}")
-    load_c2_blocklist = correlate_c2_ips_from_pcap = print_c2_hits_table = export_c2_hits_csv = None
+    load_c2_blocklist = load_c2_blocklist_from_urls = None
+    correlate_c2_ips_from_pcap = print_c2_hits_table = export_c2_hits_csv = None
+    KNOWN_C2_BLOCKLIST_URLS = {}
 
 # -----------------------
 # CONFIG
@@ -5658,8 +5662,13 @@ def pipeline(pcap_sources=None):
         if C2_BLOCKLIST_AVAILABLE:
             print("[17b/20] Correlating traffic with C2 blocklist...")
             try:
-                # Load C2 blocklist (default + any external file)
-                c2_blocklist = load_c2_blocklist()
+                # Load C2 blocklist from known sources (Feodo Tracker, SSL Blacklist, etc.)
+                # This fetches live data from well-known threat intelligence feeds
+                print("  - Fetching C2 blocklists from known threat intel sources...")
+                c2_blocklist = load_c2_blocklist_from_urls(
+                    include_default=True,           # Include hardcoded IPs
+                    include_known_sources=True      # Fetch from Feodo Tracker, SSL Blacklist, etc.
+                )
                 
                 # Correlate all traffic against blocklist
                 c2_blocklist_hits = correlate_c2_ips_from_pcap(

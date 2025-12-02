@@ -403,12 +403,22 @@ The tool includes a C2 IP blocklist correlation feature that matches observed tr
 
 ### Features
 
-- **Blocklist Loading**: Load C2 IPs from text files, hardcoded defaults, or external feeds
+- **Automatic URL Fetching**: Downloads C2 IPs from known threat intelligence feeds (Feodo Tracker, SSL Blacklist)
 - **Multi-Protocol Correlation**: Scan TCP, HTTP, DNS, TLS, and UDP traffic
 - **ASN Enrichment**: Show ASN number and owner organization for matched IPs
 - **Reputation Scoring**: Classify matches as MALICIOUS, SUSPICIOUS, or UNKNOWN
 - **Dashboard Integration**: View matches in the web dashboard
 - **CSV Export**: Export matches to CSV for further analysis
+
+### Pre-configured C2 Blocklist Sources
+
+The tool automatically fetches from these well-known threat intelligence sources:
+
+| Source | URL | Description |
+|--------|-----|-------------|
+| Feodo Tracker | https://feodotracker.abuse.ch/downloads/ipblocklist.txt | Tracks Emotet, Dridex, TrickBot, QakBot, BazarLoader |
+| SSL Blacklist | https://sslbl.abuse.ch/blacklist/sslipblacklist.txt | IPs with malicious SSL certificates |
+| Abuse.ch Recommended | https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt | Comprehensive botnet C2 list |
 
 ### Output Table Columns
 
@@ -424,29 +434,53 @@ The tool includes a C2 IP blocklist correlation feature that matches observed tr
 | ASN_OWNER | Organization that owns the ASN |
 | REPUTATION | Threat reputation (MALICIOUS, SUSPICIOUS, UNKNOWN) |
 
-### Updating the C2 Blocklist
+### Configuring C2 Blocklist Sources
 
-1. **Text File**: Create a file with one IP per line (lines starting with # are comments)
-   ```
-   # Known C2 IPs
-   45.33.32.156
-   104.131.74.14
-   ```
+#### Option 1: Use Pre-configured Sources (Recommended)
+The tool automatically fetches from known sources when you run the analysis:
+```python
+from c2_blocklist import load_c2_blocklist_from_urls
 
-2. **Hardcoded**: Add IPs to `DEFAULT_C2_IPS` set in `c2_blocklist.py`
+# Load from all known sources (Feodo Tracker, SSL Blacklist, etc.)
+c2_ips = load_c2_blocklist_from_urls()
+```
 
-3. **External Feed**: Download from recommended sources:
-   - Feodo Tracker: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
-   - abuse.ch SSL Blacklist: https://sslbl.abuse.ch/blacklist/sslipblacklist.txt
-   - URLhaus: https://urlhaus.abuse.ch/downloads/text/
+#### Option 2: Add Custom URLs
+Add your own blocklist URLs to `KNOWN_C2_BLOCKLIST_URLS` in `c2_blocklist.py`:
+```python
+KNOWN_C2_BLOCKLIST_URLS = {
+    'feodo_tracker': 'https://feodotracker.abuse.ch/downloads/ipblocklist.txt',
+    'sslbl': 'https://sslbl.abuse.ch/blacklist/sslipblacklist.txt',
+    # Add your custom sources here:
+    'my_custom_feed': 'https://example.com/my_blocklist.txt',
+}
+```
+
+#### Option 3: Load from Local File
+```python
+from c2_blocklist import load_c2_blocklist
+
+# Load from a local file
+c2_ips = load_c2_blocklist('my_c2_list.txt')
+```
+
+#### Option 4: Add Hardcoded IPs
+Add IPs to `DEFAULT_C2_IPS` set in `c2_blocklist.py`:
+```python
+DEFAULT_C2_IPS = {
+    "45.33.32.156",
+    "104.131.74.14",
+    # Add more IPs here
+}
+```
 
 ### Usage Example
 
 ```python
-from c2_blocklist import load_c2_blocklist, correlate_c2_ips_from_pcap
+from c2_blocklist import load_c2_blocklist_from_urls, correlate_c2_ips_from_pcap
 
-# Load blocklist (defaults + optional external file)
-c2_ips = load_c2_blocklist('my_c2_list.txt')
+# Load blocklist from all known sources + defaults
+c2_ips = load_c2_blocklist_from_urls()
 
 # Correlate with parsed traffic
 hits = correlate_c2_ips_from_pcap(

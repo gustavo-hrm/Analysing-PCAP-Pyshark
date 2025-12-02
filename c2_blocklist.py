@@ -57,6 +57,35 @@ import os
 import re
 import pandas as pd
 
+# Try to import requests for URL fetching
+try:
+    import urllib.request
+    import urllib.error
+    URL_FETCH_AVAILABLE = True
+except ImportError:
+    URL_FETCH_AVAILABLE = False
+    print("[C2 Blocklist] Warning: urllib not available for URL fetching")
+
+# -----------------------
+# Known C2 Blocklist URLs
+# -----------------------
+# Pre-configured URLs to well-known C2/Botnet IP blocklists.
+# These are automatically downloaded when using load_c2_blocklist_from_urls()
+#
+# To add more sources, add entries to this dictionary:
+#   'source_name': 'url_to_ip_blocklist'
+#
+KNOWN_C2_BLOCKLIST_URLS = {
+    # Feodo Tracker - Tracks botnet C2 servers (Emotet, Dridex, TrickBot, QakBot, BazarLoader, etc.)
+    'feodo_tracker': 'https://feodotracker.abuse.ch/downloads/ipblocklist.txt',
+    
+    # SSL Blacklist - IPs associated with malicious SSL certificates
+    'sslbl': 'https://sslbl.abuse.ch/blacklist/sslipblacklist.txt',
+    
+    # Abuse.ch Botnet C2 IPs (recommended, comprehensive)
+    'abuse_ch_botnet': 'https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt',
+}
+
 # Import ASN enrichment module
 try:
     from asn_enrichment import enrich_ip as asn_enrich_ip
@@ -252,6 +281,143 @@ def load_c2_blocklist(source=None, include_default=True):
     
     print(f"[C2 Blocklist] Total unique C2 IPs: {len(c2_ips)}")
     return c2_ips
+
+
+def load_c2_blocklist_from_url(url, timeout=30):
+    """
+    Load C2 IP blocklist from a URL.
+    
+    Args:
+        url: URL to fetch the blocklist from (one IP per line format)
+        timeout: Request timeout in seconds (default: 30)
+        
+    Returns:
+        set: Set of C2 IP addresses from the URL
+        
+    Example:
+        >>> ips = load_c2_blocklist_from_url('https://feodotracker.abuse.ch/downloads/ipblocklist.txt')
+        >>> print(f"Loaded {len(ips)} IPs")
+    """
+    if not URL_FETCH_AVAILABLE:
+        print("[C2 Blocklist] Error: urllib not available for URL fetching")
+        return set()
+    
+    c2_ips = set()
+    
+    try:
+        print(f"[C2 Blocklist] Fetching blocklist from: {url}")
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'PCAP-Analyzer/1.0 (Threat Intel Loader)'}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            content = response.read().decode('utf-8', errors='ignore')
+            
+            for line in content.splitlines():
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#') or line.startswith(';'):
+                    continue
+                # Extract IP (handle lines with additional data)
+                ip = line.split()[0] if line else ''
+                # Also handle CSV format (IP,port or IP;port)
+                if ',' in ip:
+                    ip = ip.split(',')[0]
+                if ';' in ip:
+                    ip = ip.split(';')[0]
+                    
+                if is_valid_ipv4(ip):
+                    c2_ips.add(ip)
+            
+            print(f"[C2 Blocklist] Loaded {len(c2_ips)} C2 IPs from URL")
+            
+    except urllib.error.URLError as e:
+        print(f"[C2 Blocklist] Error fetching URL {url}: {e}")
+    except Exception as e:
+        print(f"[C2 Blocklist] Error processing URL {url}: {e}")
+    
+    return c2_ips
+
+
+def load_c2_blocklist_from_urls(urls=None, include_default=True, include_known_sources=True):
+    """
+    Load C2 IP blocklist from multiple URLs and merge with defaults.
+    
+    This is the recommended function to get a comprehensive C2 blocklist.
+    It downloads from well-known threat intelligence sources and merges
+    with the hardcoded defaults.
+    
+    Args:
+        urls: List of additional URLs to fetch (optional)
+        include_default: Whether to include hardcoded DEFAULT_C2_IPS (default: True)
+        include_known_sources: Whether to fetch from KNOWN_C2_BLOCKLIST_URLS (default: True)
+        
+    Returns:
+        set: Merged set of all C2 IP addresses
+        
+    Example:
+        # Load from all known sources + defaults
+        >>> c2_ips = load_c2_blocklist_from_urls()
+        
+        # Load from specific URLs only
+        >>> c2_ips = load_c2_blocklist_from_urls(
+        ...     urls=['https://example.com/my_blocklist.txt'],
+        ...     include_known_sources=False
+        ... )
+        
+    Known Sources (automatically included when include_known_sources=True):
+        - Feodo Tracker: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+        - SSL Blacklist: https://sslbl.abuse.ch/blacklist/sslipblacklist.txt
+        - Abuse.ch Botnet C2: https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt
+    """
+    c2_ips = set()
+    
+    # Include default hardcoded IPs
+    if include_default:
+        c2_ips.update(DEFAULT_C2_IPS)
+        print(f"[C2 Blocklist] Loaded {len(DEFAULT_C2_IPS)} default C2 IPs")
+    
+    # Fetch from known sources
+    if include_known_sources and URL_FETCH_AVAILABLE:
+        print(f"[C2 Blocklist] Fetching from {len(KNOWN_C2_BLOCKLIST_URLS)} known sources...")
+        for source_name, url in KNOWN_C2_BLOCKLIST_URLS.items():
+            try:
+                source_ips = load_c2_blocklist_from_url(url)
+                if source_ips:
+                    print(f"  - {source_name}: {len(source_ips)} IPs")
+                    c2_ips.update(source_ips)
+            except Exception as e:
+                print(f"  - {source_name}: Failed ({e})")
+    
+    # Fetch from additional URLs
+    if urls:
+        print(f"[C2 Blocklist] Fetching from {len(urls)} additional URLs...")
+        for url in urls:
+            try:
+                url_ips = load_c2_blocklist_from_url(url)
+                if url_ips:
+                    print(f"  - {url}: {len(url_ips)} IPs")
+                    c2_ips.update(url_ips)
+            except Exception as e:
+                print(f"  - {url}: Failed ({e})")
+    
+    print(f"[C2 Blocklist] Total unique C2 IPs: {len(c2_ips)}")
+    return c2_ips
+
+
+def get_available_blocklist_sources():
+    """
+    Get list of available C2 blocklist sources.
+    
+    Returns:
+        dict: Dictionary of source names and their URLs
+        
+    Example:
+        >>> sources = get_available_blocklist_sources()
+        >>> for name, url in sources.items():
+        ...     print(f"{name}: {url}")
+    """
+    return KNOWN_C2_BLOCKLIST_URLS.copy()
 
 
 def correlate_c2_ips_from_pcap(tcp_df=None, http_df=None, dns_df=None, tls_df=None, 
