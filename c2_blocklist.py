@@ -90,6 +90,20 @@ KNOWN_C2_BLOCKLIST_URLS = {
     
     # Abuse.ch Adwind/Qrypter RAT C2 servers
     'adwind_qrypter': 'https://abuse.ch/downloads/blog/adwind_qrypter_c2s_20180409.txt',
+    
+    # Montysecurity C2-Tracker - Framework-specific C2 IPs
+    'c2_tracker_cobalt': 'https://raw.githubusercontent.com/montysecurity/C2-Tracker/main/data/Cobalt%20Strike%20C2%20IPs.txt',
+    'c2_tracker_metasploit': 'https://raw.githubusercontent.com/montysecurity/C2-Tracker/main/data/Metasploit%20C2%20IPs.txt',
+    'c2_tracker_havoc': 'https://raw.githubusercontent.com/montysecurity/C2-Tracker/main/data/Havoc%20C2%20IPs.txt',
+    'c2_tracker_sliver': 'https://raw.githubusercontent.com/montysecurity/C2-Tracker/main/data/Sliver%20C2%20IPs.txt',
+    'c2_tracker_brute_ratel': 'https://raw.githubusercontent.com/montysecurity/C2-Tracker/main/data/Brute%20Ratel%20C4%20IPs.txt',
+    'c2_tracker_posh': 'https://raw.githubusercontent.com/montysecurity/C2-Tracker/main/data/Posh%20C2%20IPs.txt',
+    
+    # Additional threat intelligence sources
+    'blocklist_de_all': 'https://lists.blocklist.de/lists/all.txt',
+    'et_compromised': 'https://rules.emergingthreats.net/blockrules/compromised-ips.txt',
+    'cinsscore': 'https://cinsscore.com/list/ci-badguys.txt',
+    'binarydefense': 'https://www.binarydefense.com/banlist.txt',
 }
 
 # Import ASN enrichment module
